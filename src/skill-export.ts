@@ -43,16 +43,27 @@ Comments live in a fenced block at the **end of the file**. The prose above stay
   JSON strings escape newlines as \\\\n.
 `;
 
-declare const require: ((m: string) => any) | undefined;
+interface NodeFsLike {
+  mkdirSync(dir: string, opts: { recursive: boolean }): void;
+  writeFileSync(file: string, data: string, encoding: string): void;
+}
+interface NodeOsLike {
+  homedir(): string;
+}
+interface NodePathLike {
+  join(...parts: string[]): string;
+}
+
+declare const require: ((m: string) => unknown) | undefined;
 
 /** Schreibt die Skill-Datei nach ~/.claude/skills/obsidian-tandem-comments/SKILL.md (nur Desktop). */
 export function exportSkill(): string {
   if (typeof require !== "function") {
     throw new Error("Skill export is only available in the desktop app.");
   }
-  const fs = require("fs");
-  const os = require("os");
-  const path = require("path");
+  const fs = require("fs") as NodeFsLike;
+  const os = require("os") as NodeOsLike;
+  const path = require("path") as NodePathLike;
   const dir = path.join(os.homedir(), ".claude", "skills", "obsidian-tandem-comments");
   fs.mkdirSync(dir, { recursive: true });
   const file = path.join(dir, "SKILL.md");

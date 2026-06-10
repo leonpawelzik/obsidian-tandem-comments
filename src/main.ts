@@ -63,14 +63,22 @@ export default class CommentsPlugin extends Plugin {
         );
       })
     );
+
+    this.registerEvent(
+      this.app.workspace.on("window-open", (win) => {
+        win.doc.body.style.setProperty("--tc-highlight-color", this.settings.highlightColor);
+      })
+    );
   }
 
   onunload(): void {
-    document.body.style.removeProperty("--tc-highlight-color");
+    for (const doc of this.allDocuments()) {
+      doc.body.style.removeProperty("--tc-highlight-color");
+    }
   }
 
   async loadSettings(): Promise<void> {
-    this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+    this.settings = Object.assign({}, DEFAULT_SETTINGS, (await this.loadData()) as Partial<CommentsSettings>);
   }
 
   async saveSettings(): Promise<void> {
@@ -78,8 +86,17 @@ export default class CommentsPlugin extends Plugin {
     this.applyHighlightColor();
   }
 
+  /** Haupt-Fenster + alle Popout-Fenster. */
+  private allDocuments(): Set<Document> {
+    const docs = new Set<Document>([activeDocument]);
+    this.app.workspace.iterateAllLeaves((leaf) => docs.add(leaf.view.containerEl.ownerDocument));
+    return docs;
+  }
+
   applyHighlightColor(): void {
-    document.body.style.setProperty("--tc-highlight-color", this.settings.highlightColor);
+    for (const doc of this.allDocuments()) {
+      doc.body.style.setProperty("--tc-highlight-color", this.settings.highlightColor);
+    }
   }
 
   nowTs(): string {
