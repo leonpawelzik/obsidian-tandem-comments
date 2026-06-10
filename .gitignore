@@ -1,0 +1,6 @@
+node_modules/
+main.js
+*.map
+.DS_Store
+docs/superpowers/
+docs/RELEASING.md

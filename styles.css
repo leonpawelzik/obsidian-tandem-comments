@@ -1,0 +1,128 @@
+/* Tandem Comments */
+
+.tc-highlight {
+  background-color: color-mix(in srgb, var(--tc-highlight-color, #ffd54a) 30%, transparent);
+  border-bottom: 2px solid var(--tc-highlight-color, #ffd54a);
+  cursor: pointer;
+}
+
+.tc-sidebar {
+  padding: 8px;
+  overflow-y: auto;
+}
+
+.tc-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 10px;
+}
+
+.tc-title {
+  font-weight: 600;
+}
+
+.tc-card {
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 8px;
+  padding: 8px;
+  margin-bottom: 10px;
+  background: var(--background-primary);
+}
+
+.tc-card.tc-focused {
+  border-color: var(--interactive-accent);
+}
+
+.tc-card.tc-resolved {
+  opacity: 0.65;
+}
+
+.tc-card.tc-orphan {
+  border-style: dashed;
+}
+
+.tc-quote {
+  font-style: italic;
+  color: var(--text-muted);
+  border-left: 3px solid var(--tc-highlight-color, #ffd54a);
+  padding-left: 6px;
+  margin-bottom: 6px;
+}
+
+.tc-quote-link {
+  cursor: pointer;
+}
+
+.tc-quote-link:hover {
+  color: var(--text-normal);
+}
+
+.tc-entry {
+  margin: 6px 0;
+}
+
+.tc-meta {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  font-size: var(--font-ui-smaller);
+  color: var(--text-muted);
+}
+
+.tc-author {
+  font-weight: 600;
+  color: var(--text-normal);
+}
+
+.tc-text {
+  white-space: pre-wrap;
+}
+
+.tc-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 6px;
+  flex-wrap: wrap;
+}
+
+.tc-input {
+  width: 100%;
+  margin-top: 6px;
+  resize: vertical;
+}
+
+.tc-section {
+  margin: 14px 0 6px;
+  font-weight: 600;
+  font-size: var(--font-ui-smaller);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+}
+
+.tc-empty,
+.tc-error {
+  color: var(--text-muted);
+  padding: 12px 4px;
+}
+
+.tc-error {
+  color: var(--text-error);
+}
+
+.tc-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border-radius: 999px;
+  padding: 2px 12px;
+  font-size: var(--font-ui-smaller);
+  background: var(--background-secondary);
+  border: 1px solid var(--background-modifier-border);
+  cursor: pointer;
+}
+
+.tc-pill-error {
+  color: var(--text-error);
+}

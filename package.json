@@ -1,0 +1,22 @@
+{
+  "name": "tandem-comments",
+  "version": "0.1.0",
+  "description": "Google Docs-style comments for Obsidian — quote-anchored, prose stays pristine, AI-assistant friendly",
+  "main": "main.js",
+  "type": "module",
+  "scripts": {
+    "dev": "node esbuild.config.mjs",
+    "build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@codemirror/state": "6.5.0",
+    "@codemirror/view": "6.38.6",
+    "builtin-modules": "^3.3.0",
+    "esbuild": "^0.28.0",
+    "obsidian": "latest",
+    "tslib": "^2.6.2",
+    "typescript": "^5.4.5",
+    "vitest": "^4.1.8"
+  }
+}
