@@ -70,7 +70,9 @@ Inline comment markers break plain-text workflows: they show up in exports, conf
 
 ## Installation
 
-Until the plugin is accepted into the community directory: download `main.js`, `manifest.json`, and `styles.css` from the latest release into `<vault>/.obsidian/plugins/tandem-comments/` and enable it in **Settings → Community plugins**.
+Tandem Comments is in the [Obsidian community plugin directory](https://obsidian.md/plugins?id=tandem-comments): in Obsidian, open **Settings → Community plugins → Browse**, search for **Tandem Comments**, then **Install** and **Enable**.
+
+Manual install: download `main.js`, `manifest.json`, and `styles.css` from the [latest release](https://github.com/leonpawelzik/obsidian-tandem-comments/releases/latest) into `<vault>/.obsidian/plugins/tandem-comments/` and enable it in **Settings → Community plugins**.
 
 ## License
 
