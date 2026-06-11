@@ -14,6 +14,12 @@ Quote-anchored comment threads for [Obsidian](https://obsidian.md) notes. Commen
 - **Reading view pill** — the comment block renders as a compact "💬 N comments" pill
 - **AI-ready by design** — the block is plain, self-describing JSON; the settings tab exports a skill file that teaches Claude Code the format
 
+## Installation
+
+Tandem Comments is in the [Obsidian community plugin directory](https://obsidian.md/plugins?id=tandem-comments): in Obsidian, open **Settings → Community plugins → Browse**, search for **Tandem Comments**, then **Install** and **Enable**.
+
+Manual install: download `main.js`, `manifest.json`, and `styles.css` from the [latest release](https://github.com/leonpawelzik/obsidian-tandem-comments/releases/latest) into `<vault>/.obsidian/plugins/tandem-comments/` and enable it in **Settings → Community plugins**.
+
 ## How it works
 
 Comments are stored in a fenced code block at the **end of the file**. The text above it is never modified by commenting — no inline markers, no HTML spans, no IDs in your prose.
@@ -67,12 +73,6 @@ For Claude Code, **Settings → Export Claude skill** writes a ready-made skill 
 ## Why a block at the end of the file?
 
 Inline comment markers break plain-text workflows: they show up in exports, confuse other tools, and make diffs noisy. Tandem Comments keeps annotations out of your prose entirely — the file remains a normal Markdown document that happens to carry its review thread with it.
-
-## Installation
-
-Tandem Comments is in the [Obsidian community plugin directory](https://obsidian.md/plugins?id=tandem-comments): in Obsidian, open **Settings → Community plugins → Browse**, search for **Tandem Comments**, then **Install** and **Enable**.
-
-Manual install: download `main.js`, `manifest.json`, and `styles.css` from the [latest release](https://github.com/leonpawelzik/obsidian-tandem-comments/releases/latest) into `<vault>/.obsidian/plugins/tandem-comments/` and enable it in **Settings → Community plugins**.
 
 ## License
 
