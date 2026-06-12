@@ -1,9 +1,10 @@
-import { Editor, MarkdownView, Notice, Plugin, TFile } from "obsidian";
+import { Editor, MarkdownView, Notice, normalizePath, Plugin, TFile } from "obsidian";
 import { buildEditorExtension } from "./editor-extension";
+import { buildExportNote, formatTs, renderExportFileName } from "./export";
 import { registerReadingView } from "./reading-view";
 import { CommentsSettingTab, CommentsSettings, DEFAULT_SETTINGS } from "./settings";
 import { CommentSidebar, VIEW_TYPE_COMMENTS } from "./sidebar";
-import { makeAnchor, parseDocument, resolveAnchor, serializeDocument } from "./store";
+import { makeAnchor, parseDocument, resolveAll, resolveAnchor, serializeDocument } from "./store";
 import type { Anchor, ParsedDoc } from "./types";
 
 export default class CommentsPlugin extends Plugin {
@@ -49,6 +50,19 @@ export default class CommentsPlugin extends Plugin {
           }
           new Notice(n > 0 ? `${n} resolved comment${n === 1 ? "" : "s"} removed.` : "No resolved comments in this file.");
         });
+      },
+    });
+
+    this.addCommand({
+      id: "export-comments",
+      name: "Export comments of active file",
+      callback: () => {
+        const file = this.app.workspace.getActiveFile();
+        if (!file || file.extension !== "md") {
+          new Notice("No active Markdown file.");
+          return;
+        }
+        void this.exportComments(file);
       },
     });
 
@@ -119,6 +133,40 @@ export default class CommentsPlugin extends Plugin {
     const out = serializeDocument(doc, this.settings.schemaHint);
     if (out !== raw) await this.app.vault.modify(file, out);
     return true;
+  }
+
+  /** Exportiert alle Kommentare der Datei als Notiz neben der Quelldatei (überschreibt bei erneutem Export). */
+  async exportComments(file: TFile): Promise<void> {
+    const doc = await this.readDoc(file);
+    if (doc.error) {
+      new Notice("tandem-comments block is invalid — please fix the JSON: " + doc.error);
+      return;
+    }
+    const now = new Date();
+    const date = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+    const content = buildExportNote(file.basename, resolveAll(doc.prose, doc.comments), {
+      scope: this.settings.exportScope,
+      date,
+      formatTs,
+    });
+    if (!content) {
+      new Notice("No comments to export.");
+      return;
+    }
+    const name = renderExportFileName(this.settings.exportNameTemplate, file.basename, date);
+    const folder = file.parent && file.parent.path !== "/" ? file.parent.path + "/" : "";
+    const path = normalizePath(folder + name + ".md");
+    if (path === file.path) {
+      new Notice("Export name matches the source file — change the template in settings.");
+      return;
+    }
+    const existing = this.app.vault.getAbstractFileByPath(path);
+    if (existing instanceof TFile) await this.app.vault.modify(existing, content);
+    else if (existing) {
+      new Notice("Export target is a folder: " + path);
+      return;
+    } else await this.app.vault.create(path, content);
+    new Notice("Comments exported to " + path);
   }
 
   addCommentFromSelection(editor: Editor): void {

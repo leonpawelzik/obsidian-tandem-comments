@@ -11,6 +11,7 @@ Quote-anchored comment threads for [Obsidian](https://obsidian.md) notes. Commen
 - **Live highlights** in the editor; click a highlight to jump to its thread
 - **Live re-anchoring** — comments follow your text as you edit; if an anchor's text disappears, the comment becomes *orphaned* and can be re-attached to a new selection
 - **Resolve = remove** by default, keeping files clean (history mode available in settings)
+- **Copy & export** — copy any comment as Markdown (with or without its quote), or export all of a file's comments to a companion note; name template and scope are configurable in settings
 - **Reading view pill** — the comment block renders as a compact "💬 N comments" pill
 - **AI-ready by design** — the block is plain, self-describing JSON; the settings tab exports a skill file that teaches Claude Code the format
 
