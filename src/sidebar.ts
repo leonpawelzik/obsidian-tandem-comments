@@ -1,4 +1,5 @@
 import { ItemView, Notice, TFile, WorkspaceLeaf } from "obsidian";
+import { formatComment, formatTs } from "./export";
 import type CommentsPlugin from "./main";
 import { addComment, addReply, generateId, removeComment, resolveAll, setStatus } from "./store";
 import type { Anchor, ResolvedComment } from "./types";
@@ -12,11 +13,6 @@ interface Draft {
 
 function truncate(s: string, n: number): string {
   return s.length <= n ? s : s.slice(0, n - 1) + "…";
-}
-
-function formatTs(ts: string): string {
-  const d = new Date(ts);
-  return isNaN(d.getTime()) ? ts : d.toLocaleString();
 }
 
 export class CommentSidebar extends ItemView {
@@ -94,6 +90,8 @@ export class CommentSidebar extends ItemView {
       cls: "tc-toggle",
     });
     toggle.onclick = () => this.toggleResolved();
+    const exportBtn = header.createEl("button", { text: "Export", cls: "tc-toggle" });
+    exportBtn.onclick = () => void this.plugin.exportComments(file);
 
     if (this.draft && this.draft.filePath === file.path) this.renderDraft(container, file);
     else this.draft = null;
@@ -205,6 +203,11 @@ export class CommentSidebar extends ItemView {
       const reBtn = actions.createEl("button", { text: "Re-anchor to selection" });
       reBtn.onclick = () => this.reanchorFromSelection(file, r.id);
     }
+    const copyBtn = actions.createEl("button", { text: "Copy" });
+    copyBtn.onclick = () =>
+      void navigator.clipboard
+        .writeText(formatComment(r, { includeQuote: this.plugin.settings.copyIncludeQuote, formatTs }))
+        .then(() => new Notice("Comment copied."));
     const delBtn = actions.createEl("button", { text: "Delete" });
     delBtn.onclick = () => void this.plugin.updateDoc(file, (d) => removeComment(d.comments, r.id));
 
