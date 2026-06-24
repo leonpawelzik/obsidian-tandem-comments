@@ -3,6 +3,7 @@ import { Decoration, DecorationSet, EditorView, ViewPlugin, ViewUpdate } from "@
 import type CommentsPlugin from "./main";
 import { isFullReplace, mapAnchors, type TrackedAnchor } from "./reanchor";
 import { makeAnchor, parseDocument, resolveAnchor, serializeDocument } from "./store";
+import { applyTableHighlights, rangesTouchTable } from "./table-highlight";
 
 /** Markiert Transaktionen, die das Plugin selbst dispatcht (Block-Rewrite). */
 export const selfEdit = Annotation.define<boolean>();
@@ -20,6 +21,7 @@ export function buildEditorExtension(plugin: CommentsPlugin) {
       constructor(readonly view: EditorView) {
         this.syncFromDoc(view.state.doc.toString());
         this.decorations = this.buildDecorations();
+        this.scheduleTableHighlight();
       }
 
       destroy(): void {
@@ -40,6 +42,9 @@ export function buildEditorExtension(plugin: CommentsPlugin) {
       }
 
       update(u: ViewUpdate): void {
+        // Tabellen-Widgets entstehen/verschwinden auch bei Selektions- und
+        // Viewport-Wechseln (Cursor rein/raus), nicht nur bei Doc-Änderungen.
+        if (u.docChanged || u.selectionSet || u.viewportChanged) this.scheduleTableHighlight();
         if (!u.docChanged) return;
         const text = u.state.doc.toString();
         const isSelf = u.transactions.some((tr) => tr.annotation(selfEdit));
@@ -48,12 +53,32 @@ export function buildEditorExtension(plugin: CommentsPlugin) {
         } else {
           // Block-only-Edit (z.B. Sidebar-Write, Hand-Edit des JSON)?
           let minFrom = Infinity;
-          u.changes.iterChangedRanges((_fromA, _toA, fromB) => {
+          const ranges: { from: number; to: number }[] = [];
+          u.changes.iterChangedRanges((_fromA, _toA, fromB, toB) => {
             minFrom = Math.min(minFrom, fromB);
+            ranges.push({ from: fromB, to: toB });
           });
           const proseLen = parseDocument(text).prose.length;
           if (minFrom >= proseLen) {
             this.syncFromDoc(text);
+          } else if (rangesTouchTable(text, proseLen, ranges)) {
+            // Tabellen-Edit: Positionen durch die Änderung mappen (Anker folgen
+            // echten Text-Edits wie in Prosa). Anker, die bei Obsidians Tabellen-
+            // Neuformatierung (Ganz-Block-Replace) kollabieren, per exaktem Text
+            // wiederherstellen statt sie zu verlieren. performReanchor schreibt nur
+            // um, wenn der exact-Text wirklich weg ist — schützt vor Korruption.
+            const mapped = mapAnchors(this.anchors, u.changes);
+            const survived = new Set(mapped.map((a) => a.id));
+            this.anchors = mapped;
+            const doc = parseDocument(text);
+            for (const [id, c] of Object.entries(doc.comments)) {
+              if (c.status === "resolved" || survived.has(id)) continue;
+              const r = resolveAnchor(doc.prose, c.anchor);
+              if (r.kind === "resolved") this.anchors.push({ id, from: r.start, to: r.end });
+            }
+            this.anchors.sort((a, b) => a.from - b.from);
+            this.dirty = true;
+            this.scheduleReanchor();
           } else {
             this.anchors = mapAnchors(this.anchors, u.changes);
             this.dirty = true;
@@ -71,6 +96,23 @@ export function buildEditorExtension(plugin: CommentsPlugin) {
           b.add(a.from, a.to, Decoration.mark({ class: "tc-highlight", attributes: { "data-tc-id": a.id } }));
         }
         return b.finish();
+      }
+
+      /**
+       * Highlights innerhalb gerenderter Tabellen-Widgets müssen direkt ins DOM
+       * geschrieben werden (CM-mark-Dekorationen werden dort verschluckt). Das
+       * läuft in der Measure-/Write-Phase, nachdem Obsidian die Widgets gebaut hat.
+       */
+      scheduleTableHighlight(): void {
+        this.view.requestMeasure({
+          key: "tc-table-highlight",
+          read: () => null,
+          write: () => {
+            const text = this.view.state.doc.toString();
+            const proseLen = parseDocument(text).prose.length;
+            applyTableHighlights(this.view, this.anchors, text, proseLen, (id) => void plugin.openSidebar(id));
+          },
+        });
       }
 
       scheduleReanchor(): void {
@@ -96,13 +138,19 @@ export function buildEditorExtension(plugin: CommentsPlugin) {
           const c = doc.comments[t.id];
           if (!c || c.status === "resolved") continue;
           if (t.to > doc.prose.length) continue;
-          const next = makeAnchor(doc.prose, t.from, t.to);
           const cur = c.anchor;
+          // Nur umschreiben, wenn der bisherige exact-Text nicht mehr auffindbar
+          // ist (= echte Bearbeitung des Zitats). Ist er noch da, war die Änderung
+          // nur drumherum (z.B. Obsidians Tabellen-Neuformatierung) — ein Rewrite
+          // aus evtl. verschobenen Positionen würde den Anker korrumpieren.
+          if (resolveAnchor(doc.prose, cur).kind === "resolved") continue;
+          const next = makeAnchor(doc.prose, t.from, t.to);
           if (
-            next.exact !== cur.exact ||
-            next.prefix !== cur.prefix ||
-            next.suffix !== cur.suffix ||
-            next.pos !== cur.pos
+            next.exact &&
+            (next.exact !== cur.exact ||
+              next.prefix !== cur.prefix ||
+              next.suffix !== cur.suffix ||
+              next.pos !== cur.pos)
           ) {
             c.anchor = next;
             changed = true;
