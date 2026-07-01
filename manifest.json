@@ -1,7 +1,7 @@
 {
   "id": "tandem-comments",
   "name": "Tandem Comments",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "minAppVersion": "1.8.7",
   "description": "Google Docs-style comments for Markdown notes. Quote-anchored threads in a fenced block at the end of the file, so your prose stays untouched and AI assistants can read and write them too.",
   "author": "Leon Pawelzik",
