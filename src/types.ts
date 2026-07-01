@@ -28,6 +28,11 @@ export type CommentMap = Record<string, CommentEntry>;
 export interface ParsedDoc {
   prose: string;
   comments: CommentMap;
+  /**
+   * Inhalt nach der schließenden Fence-Zeile, byte-genau (z.B. Fußnoten-
+   * Definitionen, die Obsidian ans Dateiende hängt — Issue #2).
+   */
+  trailing?: string;
   /** Gesetzt, wenn ein tandem-comments-Block existiert, dessen JSON aber kaputt ist. */
   error?: string;
 }
