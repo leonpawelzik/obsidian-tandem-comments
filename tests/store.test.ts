@@ -55,6 +55,41 @@ describe("parseDocument", () => {
     expect(doc.comments).toEqual(COMMENTS);
   });
 
+  // Issue #2: Obsidian hängt Fußnoten-Definitionen ans Dateiende — hinter den Block.
+  it("parses the block when footnote definitions follow it (issue #2)", () => {
+    const prose = "Wir sollten den Preis aggressiv senken im Q3.[^1]";
+    const raw = prose + "\n" + block(JSON.stringify(COMMENTS, null, 2)) + "\n[^1]: Quelle: Pricing-Memo\n";
+    const doc = parseDocument(raw);
+    expect(doc.error).toBeUndefined();
+    expect(doc.prose).toBe(prose);
+    expect(doc.comments).toEqual(COMMENTS);
+  });
+
+  it("round-trips byte-exact when footnotes follow the block", () => {
+    const raw =
+      "Text[^1]\n" + block(JSON.stringify(COMMENTS, null, 2)) + "\n[^1]: Fußnote\n[^2]: noch eine\n";
+    const doc = parseDocument(raw);
+    expect(doc.comments).toEqual(COMMENTS);
+    expect(serializeDocument(doc, true)).toBe(raw);
+  });
+
+  it("finds its own closing fence when a code block follows in the trailing content", () => {
+    const raw = "Text\n" + block(JSON.stringify(COMMENTS, null, 2)) + "\n[^1]: siehe\n\n```js\nfoo()\n```\n";
+    const doc = parseDocument(raw);
+    expect(doc.error).toBeUndefined();
+    expect(doc.prose).toBe("Text");
+    expect(doc.comments).toEqual(COMMENTS);
+    expect(serializeDocument(doc, true)).toBe(raw);
+  });
+
+  it("sets error (not silent blank) when JSON is broken and footnotes follow", () => {
+    const raw = "Text\n```tandem-comments\n{ kaputt\n```\n[^1]: Fußnote\n";
+    const doc = parseDocument(raw);
+    expect(doc.error).toBeTruthy();
+    expect(doc.prose).toBe(raw);
+    expect(doc.comments).toEqual({});
+  });
+
   it("parses a hand-written block as Claude would author it", () => {
     const raw = [
       "Wir sollten den Preis aggressiv senken im Q3.",
@@ -119,6 +154,12 @@ describe("serializeDocument", () => {
     const doc = parseDocument(out);
     expect(doc.comments).toEqual(comments);
     expect(doc.prose).toBe("A B C");
+  });
+
+  it("keeps trailing footnotes when the last comment is removed", () => {
+    const raw = "Text[^1]\n" + block(JSON.stringify(COMMENTS, null, 2)) + "\n[^1]: Fußnote\n";
+    const doc = parseDocument(raw);
+    expect(serializeDocument({ ...doc, comments: {} }, true)).toBe("Text[^1]\n[^1]: Fußnote\n");
   });
 
   it("throws when asked to serialize a doc with parse error", () => {

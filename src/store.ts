@@ -22,10 +22,12 @@ export function parseBlockBody(body: string): CommentMap {
 interface BlockMatch {
   proseEnd: number;
   body: string;
+  trailing: string;
 }
 
 function findBlock(raw: string): BlockMatch | null {
-  // Der Block muss der letzte Inhalt der Datei sein (danach nur Whitespace).
+  // Letzter Block der Datei; danach darf weiterer Inhalt folgen (z.B. Fußnoten-
+  // Definitionen, die Obsidian ans Dateiende hängt — Issue #2).
   const idx = raw.lastIndexOf("\n" + FENCE_OPEN + "\n");
   let proseEnd: number;
   let bodyStart: number;
@@ -39,10 +41,15 @@ function findBlock(raw: string): BlockMatch | null {
     return null;
   }
   const rest = raw.slice(bodyStart);
-  const closeIdx = rest.lastIndexOf("\n```");
+  // Die eigene schließende Fence ist die erste vollständige ```-Zeile; der Body
+  // kann keine enthalten (JSON escapet Newlines, Hint-Zeilen beginnen mit //).
+  let closeIdx = rest.indexOf("\n```");
+  while (closeIdx >= 0 && closeIdx + 4 < rest.length && rest[closeIdx + 4] !== "\n") {
+    closeIdx = rest.indexOf("\n```", closeIdx + 1);
+  }
   if (closeIdx < 0) return null;
-  if (rest.slice(closeIdx + 4).trim() !== "") return null;
-  return { proseEnd, body: rest.slice(0, closeIdx) };
+  const trailing = closeIdx + 5 <= rest.length ? rest.slice(closeIdx + 5) : "";
+  return { proseEnd, body: rest.slice(0, closeIdx), trailing };
 }
 
 export function parseDocument(raw: string): ParsedDoc {
@@ -50,20 +57,25 @@ export function parseDocument(raw: string): ParsedDoc {
   if (!blk) return { prose: raw, comments: {} };
   try {
     const comments = parseBlockBody(blk.body);
-    return { prose: raw.slice(0, blk.proseEnd), comments };
+    const doc: ParsedDoc = { prose: raw.slice(0, blk.proseEnd), comments };
+    if (blk.trailing) doc.trailing = blk.trailing;
+    return doc;
   } catch (e) {
     return { prose: raw, comments: {}, error: e instanceof Error ? e.message : String(e) };
   }
 }
 
 export function serializeDocument(
-  doc: { prose: string; comments: CommentMap; error?: string },
+  doc: { prose: string; comments: CommentMap; trailing?: string; error?: string },
   schemaHint: boolean
 ): string {
   if (doc.error) throw new Error("refusing to serialize a document with a parse error: " + doc.error);
-  if (Object.keys(doc.comments).length === 0) return doc.prose;
+  const trailing = doc.trailing ?? "";
+  if (Object.keys(doc.comments).length === 0) return doc.prose + trailing;
   const hint = schemaHint ? SCHEMA_HINT_LINES.join("\n") + "\n" : "";
-  return doc.prose + "\n" + FENCE_OPEN + "\n" + hint + JSON.stringify(doc.comments, null, 2) + "\n```\n";
+  return (
+    doc.prose + "\n" + FENCE_OPEN + "\n" + hint + JSON.stringify(doc.comments, null, 2) + "\n```\n" + trailing
+  );
 }
 
 /**
