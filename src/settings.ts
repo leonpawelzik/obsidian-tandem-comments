@@ -3,7 +3,6 @@ import type CommentsPlugin from "./main";
 import { exportSkill } from "./skill-export";
 
 export interface CommentsSettings {
-  authorName: string;
   highlightColor: string;
   showResolvedByDefault: boolean;
   resolveBehavior: "keep" | "remove";
@@ -14,7 +13,6 @@ export interface CommentsSettings {
 }
 
 export const DEFAULT_SETTINGS: CommentsSettings = {
-  authorName: "Me",
   highlightColor: "#ffd54a",
   showResolvedByDefault: false,
   resolveBehavior: "remove",
@@ -33,14 +31,18 @@ export class CommentsSettingTab extends PluginSettingTab {
     const { containerEl } = this;
     containerEl.empty();
 
+    const detected = this.plugin.detectedAuthor();
     new Setting(containerEl)
       .setName("Display name")
-      .setDesc("Author label for your comments.")
+      .setDesc(
+        `Author label for your comments. Leave empty to use your detected account name ("${detected}"). ` +
+          "Stored per device and not synced, so collaborators sharing this vault keep separate names."
+      )
       .addText((t) =>
-        t.setValue(this.plugin.settings.authorName).onChange(async (v) => {
-          this.plugin.settings.authorName = v.trim() || DEFAULT_SETTINGS.authorName;
-          await this.plugin.saveSettings();
-        })
+        t
+          .setPlaceholder(detected)
+          .setValue(this.plugin.authorOverride())
+          .onChange((v) => this.plugin.setAuthorOverride(v))
       );
 
     new Setting(containerEl)

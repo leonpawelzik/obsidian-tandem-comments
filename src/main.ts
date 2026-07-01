@@ -1,4 +1,5 @@
 import { Editor, MarkdownView, Notice, normalizePath, Plugin, TFile } from "obsidian";
+import { AUTHOR_OVERRIDE_KEY, detectOsUsername, FALLBACK_AUTHOR, resolveAuthorName } from "./author";
 import { buildEditorExtension } from "./editor-extension";
 import { buildExportNote, formatTs, renderExportFileName } from "./export";
 import { registerReadingView } from "./reading-view";
@@ -92,12 +93,53 @@ export default class CommentsPlugin extends Plugin {
   }
 
   async loadSettings(): Promise<void> {
-    this.settings = Object.assign({}, DEFAULT_SETTINGS, (await this.loadData()) as Partial<CommentsSettings>);
+    const data = ((await this.loadData()) as (Partial<CommentsSettings> & { authorName?: string }) | null) ?? {};
+    this.migrateLegacyAuthorName(data);
+    this.settings = Object.assign({}, DEFAULT_SETTINGS, data);
   }
 
   async saveSettings(): Promise<void> {
     await this.saveData(this.settings);
     this.applyHighlightColor();
+  }
+
+  /**
+   * The author label attached to new comments/replies from this device: the
+   * manual override if set, otherwise the detected OS account username, else a
+   * generic fallback. See {@link resolveAuthorName}.
+   */
+  currentAuthor(): string {
+    return resolveAuthorName(this.authorOverride(), detectOsUsername());
+  }
+
+  /** The name auto-detection would use — shown as the settings placeholder. */
+  detectedAuthor(): string {
+    return detectOsUsername() ?? FALLBACK_AUTHOR;
+  }
+
+  /** Device-local manual override for the author label ("" when unset). Never synced. */
+  authorOverride(): string {
+    const v = this.app.loadLocalStorage(AUTHOR_OVERRIDE_KEY);
+    return typeof v === "string" ? v : "";
+  }
+
+  /** Persist the override to per-vault localStorage; an empty value clears it. */
+  setAuthorOverride(value: string): void {
+    const trimmed = value.trim();
+    this.app.saveLocalStorage(AUTHOR_OVERRIDE_KEY, trimmed || null);
+  }
+
+  /**
+   * One-time transition: the author name used to live in synced settings. Seed
+   * it as this device's local override (unless one already exists) and drop it
+   * from the settings object so it stops being synced.
+   */
+  private migrateLegacyAuthorName(data: { authorName?: string }): void {
+    const legacy = data.authorName?.trim();
+    if (legacy && legacy !== FALLBACK_AUTHOR && !this.authorOverride()) {
+      this.setAuthorOverride(legacy);
+    }
+    delete data.authorName;
   }
 
   /** Haupt-Fenster + alle Popout-Fenster. */
