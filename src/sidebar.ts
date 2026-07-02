@@ -6,8 +6,10 @@ import {
   addReply,
   addSuggestion,
   declineSuggestion,
+  editEntry,
   generateId,
   removeComment,
+  removeEntry,
   resolveAll,
   setStatus,
   type SuggestionFailureReason,
@@ -356,13 +358,22 @@ export class CommentSidebar extends ItemView {
       }
     }
 
-    for (const entry of r.comment.thread) {
+    r.comment.thread.forEach((entry, index) => {
       const row = card.createDiv({ cls: "tc-entry" });
       const meta = row.createDiv({ cls: "tc-meta" });
       meta.createSpan({ text: entry.author, cls: "tc-author" });
       meta.createSpan({ text: formatTs(entry.ts), cls: "tc-ts" });
-      row.createDiv({ text: entry.text, cls: "tc-text" });
-    }
+
+      const entryActions = meta.createDiv({ cls: "tc-entry-actions" });
+      const editBtn = entryActions.createEl("button", { text: "Edit", cls: "tc-entry-btn" });
+      const entryDelBtn = entryActions.createEl("button", { text: "Delete", cls: "tc-entry-btn" });
+
+      const textEl = row.createDiv({ text: entry.text, cls: "tc-text" });
+
+      editBtn.onclick = () => this.startEntryEdit(row, textEl, file, r.id, index, entry.text);
+      entryDelBtn.onclick = () =>
+        void this.plugin.updateDoc(file, (d) => removeEntry(d.comments, r.id, index));
+    });
 
     const actions = card.createDiv({ cls: "tc-actions" });
     if (r.comment.status === "open" && r.comment.suggestion && !r.comment.suggestion.result) {
@@ -411,8 +422,12 @@ export class CommentSidebar extends ItemView {
       void navigator.clipboard
         .writeText(formatComment(r, { includeQuote: this.plugin.settings.copyIncludeQuote, formatTs }))
         .then(() => new Notice("Thread copied."));
-    const delBtn = actions.createEl("button", { text: "Delete" });
-    delBtn.onclick = () => void this.plugin.updateDoc(file, (d) => removeComment(d.comments, r.id));
+    // Suggestion cards may carry an empty thread, so no root entry exists to host a
+    // per-entry Delete. Keep the card-level Delete only for those.
+    if (r.comment.thread.length === 0) {
+      const delBtn = actions.createEl("button", { text: "Delete" });
+      delBtn.onclick = () => void this.plugin.updateDoc(file, (d) => removeComment(d.comments, r.id));
+    }
 
     if (r.comment.status === "open") {
       const reply = card.createEl("textarea", {
@@ -431,6 +446,36 @@ export class CommentSidebar extends ItemView {
         }
       };
     }
+  }
+
+  /** Ersetzt den Eintragstext durch ein Textarea; Enter speichert, Esc bricht ab. */
+  private startEntryEdit(
+    row: HTMLElement,
+    textEl: HTMLElement,
+    file: TFile,
+    id: string,
+    index: number,
+    current: string
+  ): void {
+    textEl.hide();
+    const input = row.createEl("textarea", {
+      cls: "tc-input",
+      attr: { placeholder: "Edit… (Enter = save, Esc = cancel)", rows: "2" },
+    });
+    input.value = current;
+    window.setTimeout(() => input.focus(), 0);
+    input.onkeydown = (e) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        void this.render();
+      } else if (e.key === "Enter" && !e.shiftKey) {
+        e.preventDefault();
+        const text = input.value.trim();
+        if (!text) return;
+        input.value = "";
+        void this.plugin.updateDoc(file, (d) => editEntry(d.comments, id, index, text));
+      }
+    };
   }
 
   private reanchorFromSelection(file: TFile, id: string): void {

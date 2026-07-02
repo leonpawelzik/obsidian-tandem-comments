@@ -79,6 +79,33 @@
   color: var(--text-normal);
 }
 
+.tc-entry-actions {
+  margin-left: auto;
+  display: flex;
+  gap: 4px;
+  opacity: 0;
+  transition: opacity 0.1s ease-in;
+}
+
+.tc-card:hover .tc-entry-actions,
+.tc-entry:focus-within .tc-entry-actions {
+  opacity: 1;
+}
+
+.tc-entry-btn {
+  padding: 0 6px;
+  font-size: var(--font-ui-smaller);
+  color: var(--text-muted);
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  box-shadow: none;
+}
+
+.tc-entry-btn:hover {
+  color: var(--text-normal);
+}
+
 .tc-text {
   white-space: pre-wrap;
 }

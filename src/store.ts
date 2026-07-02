@@ -203,6 +203,27 @@ export function setStatus(comments: CommentMap, id: string, status: CommentStatu
   c.status = status;
 }
 
+export function editEntry(comments: CommentMap, id: string, index: number, text: string): void {
+  const c = comments[id];
+  if (!c) throw new Error(`tandem-comments: unknown comment id "${id}"`);
+  const entry = c.thread[index];
+  if (!entry) throw new Error(`tandem-comments: thread entry ${index} out of range for comment "${id}"`);
+  entry.text = text;
+}
+
+export function removeEntry(comments: CommentMap, id: string, index: number): void {
+  const c = comments[id];
+  if (!c) throw new Error(`tandem-comments: unknown comment id "${id}"`);
+  if (!c.thread[index]) {
+    throw new Error(`tandem-comments: thread entry ${index} out of range for comment "${id}"`);
+  }
+  if (index === 0) {
+    delete comments[id];
+    return;
+  }
+  c.thread.splice(index, 1);
+}
+
 export function removeComment(comments: CommentMap, id: string): void {
   delete comments[id];
 }
