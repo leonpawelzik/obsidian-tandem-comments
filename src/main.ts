@@ -22,21 +22,25 @@ export default class CommentsPlugin extends Plugin {
     this.addCommand({
       id: "add-comment",
       name: "Add comment",
+      icon: "message-square-plus",
       editorCallback: (editor) => this.addCommentFromSelection(editor),
     });
     this.addCommand({
       id: "open-sidebar",
       name: "Open comment sidebar",
+      icon: "message-square",
       callback: () => void this.openSidebar(),
     });
     this.addCommand({
       id: "toggle-resolved",
       name: "Toggle resolved comments",
+      icon: "check-check",
       callback: () => void this.openSidebar().then((v) => v?.toggleResolved()),
     });
     this.addCommand({
       id: "purge-resolved",
       name: "Remove resolved comments from file",
+      icon: "trash-2",
       callback: () => {
         const file = this.app.workspace.getActiveFile();
         if (!file || file.extension !== "md") return;
@@ -56,6 +60,7 @@ export default class CommentsPlugin extends Plugin {
     this.addCommand({
       id: "export-comments",
       name: "Export comments of active file",
+      icon: "file-output",
       callback: () => {
         const file = this.app.workspace.getActiveFile();
         if (!file || file.extension !== "md") {
