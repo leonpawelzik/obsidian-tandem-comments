@@ -126,3 +126,8 @@
 .tc-pill-error {
   color: var(--text-error);
 }
+
+/* Live Preview: tandem-comments-Block-Widget vollständig ausblenden. */
+.tc-lp-hidden {
+  display: none;
+}
