@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseDocument, resolveAnchor, serializeDocument, SCHEMA_HINT_LINES } from "../src/store";
+import { normalizeTrailingChanges, parseDocument, resolveAnchor, serializeDocument, SCHEMA_HINT_LINES } from "../src/store";
 import type { CommentMap } from "../src/types";
 
 const COMMENTS: CommentMap = {
@@ -164,5 +164,76 @@ describe("serializeDocument", () => {
 
   it("throws when asked to serialize a doc with parse error", () => {
     expect(() => serializeDocument({ prose: "x", comments: {}, error: "kaputt" }, true)).toThrow();
+  });
+});
+
+describe("normalizeTrailingChanges", () => {
+  // Wendet CM-artige Simultan-Änderungen (Koordinaten im Original) auf einen String an.
+  function applyChanges(raw: string, changes: { from: number; to: number; insert: string }[]): string {
+    let out = raw;
+    for (const c of [...changes].sort((a, b) => b.from - a.from)) {
+      out = out.slice(0, c.from) + c.insert + out.slice(c.to);
+    }
+    return out;
+  }
+
+  function normalize(raw: string): string | null {
+    const changes = normalizeTrailingChanges(raw, parseDocument(raw));
+    return changes ? applyChanges(raw, changes) : null;
+  }
+
+  it("folds prose typed after the block back in front of it", () => {
+    const prose = "Wir sollten den Preis aggressiv senken im Q3.";
+    const raw = prose + "\n" + block(JSON.stringify(COMMENTS, null, 2)) + "Neuer Satz.\n";
+    const result = normalize(raw)!;
+    const doc = parseDocument(result);
+    expect(doc.prose).toBe(prose + "\nNeuer Satz.");
+    expect(doc.comments).toEqual(COMMENTS);
+    expect(doc.trailing ?? "").toBe("");
+    // Idempotent: das Ergebnis ist kanonisch.
+    expect(normalizeTrailingChanges(result, parseDocument(result))).toBeNull();
+  });
+
+  it("folds trailing text that has no final newline", () => {
+    const raw = "Prosa.\n" + block(JSON.stringify(COMMENTS, null, 2)) + "test";
+    const doc = parseDocument(normalize(raw)!);
+    expect(doc.prose).toBe("Prosa.\ntest");
+    expect(doc.comments).toEqual(COMMENTS);
+  });
+
+  it("folds footnote definitions too (block stays last)", () => {
+    const raw = "Text.[^1]\n" + block(JSON.stringify(COMMENTS, null, 2)) + "[^1]: Definition\n";
+    const doc = parseDocument(normalize(raw)!);
+    expect(doc.prose).toBe("Text.[^1]\n[^1]: Definition");
+    expect(doc.trailing ?? "").toBe("");
+  });
+
+  it("handles a file that starts with the block (empty prose)", () => {
+    const raw = block(JSON.stringify(COMMENTS, null, 2)) + "test\n";
+    const result = normalize(raw)!;
+    const doc = parseDocument(result);
+    expect(doc.prose).toBe("test");
+    expect(doc.comments).toEqual(COMMENTS);
+    expect(result.startsWith("\n")).toBe(false);
+  });
+
+  it("returns null when there is no trailing content", () => {
+    const raw = "Prosa.\n" + block(JSON.stringify(COMMENTS, null, 2));
+    expect(normalizeTrailingChanges(raw, parseDocument(raw))).toBeNull();
+  });
+
+  it("returns null for whitespace-only trailing", () => {
+    const raw = "Prosa.\n" + block(JSON.stringify(COMMENTS, null, 2)) + "\n\n  \n";
+    expect(normalizeTrailingChanges(raw, parseDocument(raw))).toBeNull();
+  });
+
+  it("returns null when the block has a parse error", () => {
+    const raw = "Prosa.\n```tandem-comments\n{ kaputt\n```\ntest\n";
+    expect(normalizeTrailingChanges(raw, parseDocument(raw))).toBeNull();
+  });
+
+  it("returns null when there is no block at all", () => {
+    const raw = "Nur Prosa.\n";
+    expect(normalizeTrailingChanges(raw, parseDocument(raw))).toBeNull();
   });
 });
