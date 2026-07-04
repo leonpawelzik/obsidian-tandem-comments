@@ -1,4 +1,4 @@
-import { Annotation, RangeSetBuilder } from "@codemirror/state";
+import { Annotation, RangeSetBuilder, Transaction } from "@codemirror/state";
 import { Decoration, DecorationSet, EditorView, ViewPlugin, ViewUpdate } from "@codemirror/view";
 import type CommentsPlugin from "./main";
 import { isFullReplace, mapAnchors, type TrackedAnchor } from "./reanchor";
@@ -134,10 +134,17 @@ export function buildEditorExtension(plugin: CommentsPlugin) {
        * sonst landet der Text im nicht kommentierbaren trailing-Bereich.
        */
       performNormalize(): void {
+        // Ausstehendes Reanchor zuerst verarbeiten: syncFromDoc (via update()) baut
+        // die Anker sonst aus dem noch nicht umgeschriebenen Block neu auf und der
+        // gerade bearbeitete Anker geht verloren, das spätere Reanchor no-opt dann.
+        if (this.dirty) this.performReanchor();
         const text = this.view.state.doc.toString();
         const changes = normalizeTrailingChanges(text, parseDocument(text));
         if (!changes) return;
-        this.view.dispatch({ changes, annotations: selfEdit.of(true) });
+        this.view.dispatch({
+          changes,
+          annotations: [selfEdit.of(true), Transaction.addToHistory.of(false)],
+        });
       }
 
       scheduleReanchor(): void {

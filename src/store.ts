@@ -85,6 +85,8 @@ export function serializeDocument(
  * Änderungen (Block löschen, am Ende wieder anfügen) statt Ganz-Ersetzung,
  * damit CodeMirror den Cursor eines gerade tippenden Users korrekt mappt.
  * Anker sind zitat-basiert und überleben die Verschiebung. null = kanonisch.
+ * Invariante: doc muss parseDocument(raw) desselben raw sein, sonst sind die
+ * berechneten Offsets Müll.
  */
 export function normalizeTrailingChanges(
   raw: string,

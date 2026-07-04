@@ -217,6 +217,15 @@ describe("normalizeTrailingChanges", () => {
     expect(result.startsWith("\n")).toBe(false);
   });
 
+  it("folds a trailing fenced code block back in front of the block", () => {
+    const raw = "Prosa.\n" + block(JSON.stringify(COMMENTS, null, 2)) + "```js\ncode()\n```\n";
+    const result = normalize(raw)!;
+    const doc = parseDocument(result);
+    expect(doc.prose).toBe("Prosa.\n```js\ncode()\n```");
+    expect(doc.comments).toEqual(COMMENTS);
+    expect(doc.trailing ?? "").toBe("");
+  });
+
   it("returns null when there is no trailing content", () => {
     const raw = "Prosa.\n" + block(JSON.stringify(COMMENTS, null, 2));
     expect(normalizeTrailingChanges(raw, parseDocument(raw))).toBeNull();
