@@ -16,6 +16,8 @@ export function registerReadingView(plugin: CommentsPlugin): void {
 }
 
 class BlockPill extends MarkdownRenderChild {
+  private unloaded = false;
+
   constructor(
     containerEl: HTMLElement,
     readonly source: string,
@@ -25,9 +27,28 @@ class BlockPill extends MarkdownRenderChild {
   }
 
   onload(): void {
+    this.render();
+  }
+
+  onunload(): void {
+    this.unloaded = true;
+  }
+
+  render(): void {
     const el = this.containerEl;
     el.empty();
-    if (el.closest(".markdown-source-view, .cm-editor")) {
+    // Beim Moduswechsel (Cmd+E) kann onload feuern, bevor das Element im DOM
+    // hängt — dann liefert closest() nichts. Einen Frame warten und neu prüfen.
+    if (!el.isConnected) {
+      requestAnimationFrame(() => {
+        if (!this.unloaded) this.render();
+      });
+      return;
+    }
+    // Pille nur bei positivem Reading-View-Beleg rendern; im Zweifel
+    // unsichtbar — eine fälschliche Pille fällt in Live Preview auf,
+    // eine fehlende in der Reading View wird beim nächsten Render geheilt.
+    if (!el.closest(".markdown-preview-view")) {
       const widget = el.closest(".cm-embed-block");
       if (widget instanceof HTMLElement) widget.addClass("tc-lp-hidden");
       return;
