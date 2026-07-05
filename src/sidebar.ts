@@ -69,6 +69,7 @@ export class CommentSidebar extends ItemView {
 
   async render(): Promise<void> {
     const container = this.contentEl;
+    const prevScroll = container.scrollTop;
     container.empty();
     container.addClass("tc-sidebar");
 
@@ -121,6 +122,7 @@ export class CommentSidebar extends ItemView {
       container.createDiv({ text: "Resolved", cls: "tc-section" });
       for (const r of done) this.renderComment(container, file, r);
     }
+    container.scrollTop = prevScroll;
   }
 
   private renderDraft(container: HTMLElement, file: TFile): void {
