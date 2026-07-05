@@ -1,14 +1,15 @@
-import { Annotation, RangeSetBuilder } from "@codemirror/state";
+import { Annotation, RangeSetBuilder, Transaction } from "@codemirror/state";
 import { Decoration, DecorationSet, EditorView, ViewPlugin, ViewUpdate } from "@codemirror/view";
 import type CommentsPlugin from "./main";
 import { isFullReplace, mapAnchors, type TrackedAnchor } from "./reanchor";
-import { makeAnchor, parseDocument, resolveAnchor, serializeDocument } from "./store";
+import { makeAnchor, normalizeTrailingChanges, parseDocument, resolveAnchor, serializeDocument } from "./store";
 import { applyTableHighlights, rangesTouchTable } from "./table-highlight";
 
 /** Markiert Transaktionen, die das Plugin selbst dispatcht (Block-Rewrite). */
 export const selfEdit = Annotation.define<boolean>();
 
 const REANCHOR_DEBOUNCE_MS = 800;
+const NORMALIZE_DEBOUNCE_MS = 500;
 
 export function buildEditorExtension(plugin: CommentsPlugin) {
   return ViewPlugin.fromClass(
@@ -17,15 +18,18 @@ export function buildEditorExtension(plugin: CommentsPlugin) {
       anchors: TrackedAnchor[] = [];
       dirty = false;
       timer: number | null = null;
+      normalizeTimer: number | null = null;
 
       constructor(readonly view: EditorView) {
         this.syncFromDoc(view.state.doc.toString());
         this.decorations = this.buildDecorations();
         this.scheduleTableHighlight();
+        this.scheduleNormalize();
       }
 
       destroy(): void {
         if (this.timer !== null) window.clearTimeout(this.timer);
+        if (this.normalizeTimer !== null) window.clearTimeout(this.normalizeTimer);
       }
 
       syncFromDoc(text: string): void {
@@ -46,6 +50,7 @@ export function buildEditorExtension(plugin: CommentsPlugin) {
         // Viewport-Wechseln (Cursor rein/raus), nicht nur bei Doc-Änderungen.
         if (u.docChanged || u.selectionSet || u.viewportChanged) this.scheduleTableHighlight();
         if (!u.docChanged) return;
+        this.scheduleNormalize();
         const text = u.state.doc.toString();
         const isSelf = u.transactions.some((tr) => tr.annotation(selfEdit));
         if (isSelf || isFullReplace(u.changes)) {
@@ -112,6 +117,33 @@ export function buildEditorExtension(plugin: CommentsPlugin) {
             const proseLen = parseDocument(text).prose.length;
             applyTableHighlights(this.view, this.anchors, text, proseLen, (id) => void plugin.openSidebar(id));
           },
+        });
+      }
+
+      scheduleNormalize(): void {
+        if (this.normalizeTimer !== null) window.clearTimeout(this.normalizeTimer);
+        this.normalizeTimer = window.setTimeout(() => {
+          this.normalizeTimer = null;
+          this.performNormalize();
+        }, NORMALIZE_DEBOUNCE_MS);
+      }
+
+      /**
+       * Faltet Inhalt hinter dem Block (getippte Prosa, Fußnoten-Definitionen)
+       * zurück vor den Block, damit der Block das letzte Element der Datei bleibt —
+       * sonst landet der Text im nicht kommentierbaren trailing-Bereich.
+       */
+      performNormalize(): void {
+        // Ausstehendes Reanchor zuerst verarbeiten: syncFromDoc (via update()) baut
+        // die Anker sonst aus dem noch nicht umgeschriebenen Block neu auf und der
+        // gerade bearbeitete Anker geht verloren, das spätere Reanchor no-opt dann.
+        if (this.dirty) this.performReanchor();
+        const text = this.view.state.doc.toString();
+        const changes = normalizeTrailingChanges(text, parseDocument(text));
+        if (!changes) return;
+        this.view.dispatch({
+          changes,
+          annotations: [selfEdit.of(true), Transaction.addToHistory.of(false)],
         });
       }
 

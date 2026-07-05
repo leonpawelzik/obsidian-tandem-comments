@@ -79,6 +79,32 @@ export function serializeDocument(
 }
 
 /**
+ * Plant die Minimal-Änderungen, die Inhalt hinter dem Block (getippte Prosa,
+ * von Obsidian angehängte Fußnoten-Definitionen) vor den Block zurückfalten,
+ * sodass der Block wieder das letzte Element der Datei ist. Zwei Teil-
+ * Änderungen (Block löschen, am Ende wieder anfügen) statt Ganz-Ersetzung,
+ * damit CodeMirror den Cursor eines gerade tippenden Users korrekt mappt.
+ * Anker sind zitat-basiert und überleben die Verschiebung. null = kanonisch.
+ * Invariante: doc muss parseDocument(raw) desselben raw sein, sonst sind die
+ * berechneten Offsets Müll.
+ */
+export function normalizeTrailingChanges(
+  raw: string,
+  doc: ParsedDoc
+): { from: number; to: number; insert: string }[] | null {
+  if (doc.error || !doc.trailing || doc.trailing.trim() === "") return null;
+  const blockStart = doc.prose.length;
+  const blockEnd = raw.length - doc.trailing.length;
+  const block = raw.slice(blockStart, blockEnd);
+  const blockText = block.startsWith("\n") ? block.slice(1) : block;
+  const sep = raw.endsWith("\n") ? "" : "\n";
+  return [
+    { from: blockStart, to: blockEnd, insert: blockStart === 0 ? "" : "\n" },
+    { from: raw.length, to: raw.length, insert: sep + blockText },
+  ];
+}
+
+/**
  * Strikter Kontext-Vergleich. Von makeAnchor erzeugte Prefixe/Suffixe sind auf
  * den tatsächlich vorhandenen Text geklemmt und matchen daher immer exakt;
  * truncated/vakuose Matches (z.B. leerer Prefix am Dokumentanfang) sind
