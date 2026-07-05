@@ -94,8 +94,11 @@ export default class CommentsPlugin extends Plugin {
 
   async loadSettings(): Promise<void> {
     const data = ((await this.loadData()) as (Partial<CommentsSettings> & { authorName?: string }) | null) ?? {};
+    const hadLegacy = "authorName" in data;
     this.migrateLegacyAuthorName(data);
     this.settings = Object.assign({}, DEFAULT_SETTINGS, data);
+    // remove authorName from synced data if it was in there previously
+    if (hadLegacy) await this.saveData(this.settings);
   }
 
   async saveSettings(): Promise<void> {
