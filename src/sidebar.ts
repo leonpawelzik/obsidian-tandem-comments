@@ -147,7 +147,7 @@ export class CommentSidebar extends ItemView {
               d.comments,
               generateId(d.comments),
               draft.anchor,
-              this.plugin.settings.authorName,
+              this.plugin.currentAuthor(),
               this.plugin.nowTs(),
               text
             );
@@ -223,7 +223,7 @@ export class CommentSidebar extends ItemView {
           if (!text) return;
           reply.value = "";
           void this.plugin.updateDoc(file, (d) =>
-            addReply(d.comments, r.id, this.plugin.settings.authorName, this.plugin.nowTs(), text)
+            addReply(d.comments, r.id, this.plugin.currentAuthor(), this.plugin.nowTs(), text)
           );
         }
       };
