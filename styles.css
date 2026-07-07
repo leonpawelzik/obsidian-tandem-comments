@@ -75,8 +75,14 @@
   color: var(--text-normal);
 }
 
-.tc-text {
-  white-space: pre-wrap;
+.tc-text p {
+  margin: 0.35em 0;
+}
+.tc-text > :first-child {
+  margin-top: 0;
+}
+.tc-text > :last-child {
+  margin-bottom: 0;
 }
 
 .tc-actions {

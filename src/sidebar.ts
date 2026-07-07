@@ -1,4 +1,4 @@
-import { ItemView, Notice, TFile, WorkspaceLeaf } from "obsidian";
+import { ItemView, MarkdownRenderer, Notice, TFile, WorkspaceLeaf } from "obsidian";
 import { formatComment, formatTs } from "./export";
 import type CommentsPlugin from "./main";
 import { addComment, addReply, generateId, removeComment, resolveAll, setStatus } from "./store";
@@ -186,7 +186,8 @@ export class CommentSidebar extends ItemView {
       const meta = row.createDiv({ cls: "tc-meta" });
       meta.createSpan({ text: entry.author, cls: "tc-author" });
       meta.createSpan({ text: formatTs(entry.ts), cls: "tc-ts" });
-      row.createDiv({ text: entry.text, cls: "tc-text" });
+      const textEl = row.createDiv({ cls: "tc-text" });
+      void MarkdownRenderer.render(this.app, entry.text, textEl, file.path, this);
     }
 
     const actions = card.createDiv({ cls: "tc-actions" });
