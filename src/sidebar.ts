@@ -15,6 +15,29 @@ function truncate(s: string, n: number): string {
   return s.length <= n ? s : s.slice(0, n - 1) + "…";
 }
 
+/**
+ * Defence-in-depth XSS scrub for Obsidian-rendered comment Markdown.
+ * Comment text can come from collaborators, sync, or AI assistants and may
+ * contain raw HTML, so strip active content after rendering: dangerous
+ * elements, on* event handlers, and javascript:/data:/vbscript: URIs.
+ */
+function sanitizeRendered(el: HTMLElement): void {
+  el.querySelectorAll("script, iframe, object, embed, form, style, link, meta, base").forEach((n) => n.remove());
+  el.querySelectorAll("*").forEach((node) => {
+    for (const attr of Array.from(node.attributes)) {
+      const name = attr.name.toLowerCase();
+      if (name.startsWith("on")) {
+        node.removeAttribute(attr.name);
+      } else if (
+        (name === "href" || name === "src" || name === "xlink:href") &&
+        /^\s*(javascript|data|vbscript):/i.test(attr.value)
+      ) {
+        node.removeAttribute(attr.name);
+      }
+    }
+  });
+}
+
 export class CommentSidebar extends ItemView {
   private draft: Draft | null = null;
   private showResolved: boolean;
@@ -187,7 +210,9 @@ export class CommentSidebar extends ItemView {
       meta.createSpan({ text: entry.author, cls: "tc-author" });
       meta.createSpan({ text: formatTs(entry.ts), cls: "tc-ts" });
       const textEl = row.createDiv({ cls: "tc-text" });
-      void MarkdownRenderer.render(this.app, entry.text, textEl, file.path, this);
+      void MarkdownRenderer.render(this.app, entry.text, textEl, file.path, this).then(() =>
+        sanitizeRendered(textEl)
+      );
     }
 
     const actions = card.createDiv({ cls: "tc-actions" });
