@@ -67,7 +67,7 @@ class BlockPill extends MarkdownRenderChild {
     // Nur erledigte Historie übrig → in der Reading-View komplett unsichtbar.
     if (open === 0) return;
     const label =
-      resolved > 0 ? `💬 ${open} open · ${resolved} resolved` : `💬 ${open} comment${open === 1 ? "" : "s"}`;
+      resolved > 0 ? `💬 ${open} open · ${resolved} resolved` : `💬 ${open} thread${open === 1 ? "" : "s"}`;
     const pill = el.createEl("button", { text: label, cls: "tc-pill" });
     pill.onclick = () => void this.plugin.openSidebar();
   }

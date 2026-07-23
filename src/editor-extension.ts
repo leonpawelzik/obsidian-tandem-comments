@@ -1,7 +1,14 @@
 import { Annotation, RangeSetBuilder, Transaction } from "@codemirror/state";
 import { Decoration, DecorationSet, EditorView, ViewPlugin, ViewUpdate } from "@codemirror/view";
 import type CommentsPlugin from "./main";
-import { isFullReplace, mapAnchors, type TrackedAnchor } from "./reanchor";
+import {
+  changesTouchCommentBlock,
+  isFullReplace,
+  mapAnchors,
+  mergePendingAnchors,
+  shouldPreservePendingAnchors,
+  type TrackedAnchor,
+} from "./reanchor";
 import { makeAnchor, normalizeTrailingChanges, parseDocument, resolveAnchor, serializeDocument } from "./store";
 import { applyTableHighlights, rangesTouchTable } from "./table-highlight";
 
@@ -11,8 +18,54 @@ export const selfEdit = Annotation.define<boolean>();
 const REANCHOR_DEBOUNCE_MS = 800;
 const NORMALIZE_DEBOUNCE_MS = 500;
 
-export function buildEditorExtension(plugin: CommentsPlugin) {
-  return ViewPlugin.fromClass(
+export interface EditorExtensionHost {
+  settings: { schemaHint: boolean };
+  isApplyingSuggestion(): boolean;
+  openSidebar(id?: string): unknown;
+}
+
+function isObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isOpenSuggestion(value: unknown): boolean {
+  if (!isObject(value) || value.status !== "open") return false;
+  const suggestion = value.suggestion;
+  return isObject(suggestion) && suggestion.result == null;
+}
+
+function isAcceptedSuggestion(value: unknown): boolean {
+  if (!isObject(value) || value.status !== "resolved") return false;
+  const suggestion = value.suggestion;
+  return isObject(suggestion) && suggestion.result === "accepted";
+}
+
+/**
+ * Detects Undo/Redo transitions across an accepted suggestion from document
+ * semantics rather than change-range shape. End-of-prose acceptance may be
+ * coalesced into a single large range, indistinguishable from a full replace.
+ */
+export function isSuggestionAcceptanceHistoryUpdate(u: ViewUpdate, oldText: string, text: string): boolean {
+  if (!u.transactions.some((tr) => tr.isUserEvent("undo") || tr.isUserEvent("redo"))) return false;
+  const oldDoc = parseDocument(oldText);
+  const newDoc = parseDocument(text);
+  if (oldDoc.error || newDoc.error || oldDoc.prose === newDoc.prose) return false;
+  const ids = new Set([...Object.keys(oldDoc.comments), ...Object.keys(newDoc.comments)]);
+  for (const id of ids) {
+    const before = oldDoc.comments[id];
+    const after = newDoc.comments[id];
+    if (
+      (isOpenSuggestion(before) && (after === undefined || isAcceptedSuggestion(after))) ||
+      (isOpenSuggestion(after) && (before === undefined || isAcceptedSuggestion(before)))
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function editorAnchorTrackerClass(plugin: EditorExtensionHost) {
+  return (
     class {
       decorations: DecorationSet;
       anchors: TrackedAnchor[] = [];
@@ -53,20 +106,49 @@ export function buildEditorExtension(plugin: CommentsPlugin) {
         this.scheduleNormalize();
         const text = u.state.doc.toString();
         const isSelf = u.transactions.some((tr) => tr.annotation(selfEdit));
-        if (isSelf || isFullReplace(u.changes)) {
+        const oldText = u.startState.doc.toString();
+        const oldProseLen = parseDocument(oldText).prose.length;
+        const newProseLen = parseDocument(text).prose.length;
+        const fullReplace = isFullReplace(u.changes);
+        const touchesBlock = changesTouchCommentBlock(u.changes, oldProseLen, newProseLen);
+        const acceptanceHistory = isSuggestionAcceptanceHistoryUpdate(u, oldText, text);
+        const preservePending = shouldPreservePendingAnchors(
+          u.changes,
+          oldProseLen,
+          plugin.isApplyingSuggestion() || acceptanceHistory
+        );
+        const pending =
+          (this.dirty || acceptanceHistory) && touchesBlock && preservePending
+            ? mapAnchors(this.anchors, u.changes).filter((anchor) => anchor.to <= newProseLen)
+            : [];
+        if (isSelf || fullReplace || touchesBlock) {
           this.syncFromDoc(text);
+          if (pending.length > 0) {
+            const doc = parseDocument(text);
+            if (!doc.error) {
+              const recoverable = new Set(
+                Object.entries(doc.comments)
+                  .filter(
+                    ([, comment]) =>
+                      comment.status === "open" &&
+                      resolveAnchor(doc.prose, comment.anchor).kind === "orphaned"
+                  )
+                  .map(([id]) => id)
+              );
+              const merged = mergePendingAnchors(this.anchors, pending, recoverable);
+              if (merged.length > this.anchors.length) {
+                this.anchors = merged;
+                this.dirty = true;
+                this.scheduleReanchor();
+              }
+            }
+          }
         } else {
-          // Block-only-Edit (z.B. Sidebar-Write, Hand-Edit des JSON)?
-          let minFrom = Infinity;
           const ranges: { from: number; to: number }[] = [];
           u.changes.iterChangedRanges((_fromA, _toA, fromB, toB) => {
-            minFrom = Math.min(minFrom, fromB);
             ranges.push({ from: fromB, to: toB });
           });
-          const proseLen = parseDocument(text).prose.length;
-          if (minFrom >= proseLen) {
-            this.syncFromDoc(text);
-          } else if (rangesTouchTable(text, proseLen, ranges)) {
+          if (rangesTouchTable(text, newProseLen, ranges)) {
             // Tabellen-Edit: Positionen durch die Änderung mappen (Anker folgen
             // echten Text-Edits wie in Prosa). Anker, die bei Obsidians Tabellen-
             // Neuformatierung (Ganz-Block-Replace) kollabieren, per exaktem Text
@@ -192,22 +274,30 @@ export function buildEditorExtension(plugin: CommentsPlugin) {
         const serialized = serializeDocument(doc, plugin.settings.schemaHint);
         this.view.dispatch({
           changes: { from: doc.prose.length, to: text.length, insert: serialized.slice(doc.prose.length) },
-          annotations: selfEdit.of(true),
+          annotations: [selfEdit.of(true), Transaction.addToHistory.of(false)],
         });
       }
-    },
-    {
-      decorations: (v) => v.decorations,
-      eventHandlers: {
-        mousedown(e: MouseEvent) {
-          const target = e.target as HTMLElement;
-          const el = target.closest?.(".tc-highlight");
-          if (!el) return false;
-          const id = el.getAttribute("data-tc-id");
-          if (id) void plugin.openSidebar(id);
-          return false;
-        },
-      },
     }
   );
+}
+
+export function createEditorAnchorTracker(view: EditorView, plugin: EditorExtensionHost) {
+  const Tracker = editorAnchorTrackerClass(plugin);
+  return new Tracker(view);
+}
+
+export function buildEditorExtension(plugin: CommentsPlugin) {
+  return ViewPlugin.fromClass(editorAnchorTrackerClass(plugin), {
+    decorations: (v) => v.decorations,
+    eventHandlers: {
+      mousedown(e: MouseEvent) {
+        const target = e.target as HTMLElement;
+        const el = target.closest?.(".tc-highlight");
+        if (!el) return false;
+        const id = el.getAttribute("data-tc-id");
+        if (id) void plugin.openSidebar(id);
+        return false;
+      },
+    },
+  });
 }

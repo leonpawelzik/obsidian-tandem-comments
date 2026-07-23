@@ -47,7 +47,7 @@ export class CommentsSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Highlight color")
-      .setDesc("Color for open comment highlights in the text.")
+      .setDesc("Color for open review-thread highlights in the text.")
       .addColorPicker((c) =>
         c.setValue(this.plugin.settings.highlightColor).onChange(async (v) => {
           this.plugin.settings.highlightColor = v;
@@ -57,7 +57,7 @@ export class CommentsSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Show resolved by default")
-      .setDesc("Show resolved comments in the sidebar without using the toggle.")
+      .setDesc("Show resolved comments and suggestions in the sidebar without using the toggle.")
       .addToggle((t) =>
         t.setValue(this.plugin.settings.showResolvedByDefault).onChange(async (v) => {
           this.plugin.settings.showResolvedByDefault = v;
@@ -67,11 +67,14 @@ export class CommentsSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Resolve behavior")
-      .setDesc("What happens when you resolve a comment. \"Remove entirely\" keeps Markdown files clean (default).")
+      .setDesc(
+        "What happens when you resolve a comment or accept/decline a suggestion. " +
+          "\"Remove entirely\" keeps Markdown files clean (default)."
+      )
       .addDropdown((d) =>
         d
-          .addOption("remove", "Remove entirely on resolve")
-          .addOption("keep", "Keep entry as history")
+          .addOption("remove", "Remove resolved entries entirely")
+          .addOption("keep", "Keep resolved entries as history")
           .setValue(this.plugin.settings.resolveBehavior)
           .onChange(async (v) => {
             this.plugin.settings.resolveBehavior = v === "remove" ? "remove" : "keep";
@@ -91,7 +94,7 @@ export class CommentsSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Include quote when copying")
-      .setDesc("Copy the quoted passage along with the comment text when using the Copy button.")
+      .setDesc("Copy the quoted passage along with the review thread when using the Copy button.")
       .addToggle((t) =>
         t.setValue(this.plugin.settings.copyIncludeQuote).onChange(async (v) => {
           this.plugin.settings.copyIncludeQuote = v;
@@ -114,7 +117,7 @@ export class CommentsSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Export scope")
-      .setDesc("Which comments to include when exporting a file's comments.")
+      .setDesc("Which comments and suggestions to include when exporting a file's review threads.")
       .addDropdown((d) =>
         d
           .addOption("all", "All (open, resolved, orphaned)")

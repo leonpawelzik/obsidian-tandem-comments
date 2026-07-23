@@ -15,12 +15,29 @@ interface FormatOptions {
 export function formatComment(r: ResolvedComment, opts: FormatOptions): string {
   const fmt = opts.formatTs ?? ((ts: string) => ts);
   const thread = r.comment.thread.map((e) => `**${e.author}** (${fmt(e.ts)}): ${e.text}`).join("\n");
-  if (!opts.includeQuote) return thread;
+  const suggestion = r.comment.suggestion;
+  const replacement =
+    typeof suggestion?.replacement === "string"
+      ? suggestion.replacement
+      : "[Invalid suggestion: replacement must be text]";
+  const proposal = suggestion
+    ? [
+        `**Suggested edit by ${suggestion.author}** (${fmt(suggestion.ts)})${
+          suggestion.result ? ` — ${suggestion.result}` : ""
+        }:`,
+        replacement
+          .split("\n")
+          .map((line) => `> ${line}`)
+          .join("\n"),
+      ].join("\n")
+    : "";
+  const body = [proposal, thread].filter(Boolean).join("\n\n");
+  if (!opts.includeQuote) return body;
   const quote = r.comment.anchor.exact
     .split("\n")
     .map((l) => "> " + l)
     .join("\n");
-  return quote + "\n\n" + thread;
+  return body ? quote + "\n\n" + body : quote;
 }
 
 /** Zeichen, die in Dateinamen oder Wikilinks Probleme machen. */

@@ -17,10 +17,24 @@ export interface ThreadEntry {
 
 export type CommentStatus = "open" | "resolved";
 
+export type SuggestionResult = "accepted" | "declined";
+
+export interface EditSuggestion {
+  /** Replacement text proposed for the anchored passage. */
+  replacement: string;
+  /** Author and timestamp belong to the proposal itself, independently of its discussion thread. */
+  author: string;
+  ts: string;
+  /** Present only when resolved suggestions are retained as history. */
+  result?: SuggestionResult;
+}
+
 export interface CommentEntry {
   anchor: Anchor;
   status: CommentStatus;
   thread: ThreadEntry[];
+  /** Presence turns this comment into a replacement-only edit suggestion. */
+  suggestion?: EditSuggestion;
 }
 
 export type CommentMap = Record<string, CommentEntry>;
