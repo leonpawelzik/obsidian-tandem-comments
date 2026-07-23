@@ -1,7 +1,7 @@
 {
   "name": "tandem-comments",
   "version": "0.3.0",
-  "description": "Google Docs-style comments for Obsidian — quote-anchored, prose stays pristine, AI-assistant friendly",
+  "description": "Google Docs-style comments and edit suggestions for Obsidian — quote-anchored and AI-assistant friendly",
   "main": "main.js",
   "type": "module",
   "scripts": {

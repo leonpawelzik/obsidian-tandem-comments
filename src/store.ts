@@ -1,7 +1,17 @@
-import type { Anchor, AnchorResolution, CommentMap, CommentStatus, ParsedDoc, ResolvedComment } from "./types";
+import { ChangeSet } from "@codemirror/state";
+import { mapAnchors } from "./reanchor";
+import type {
+  Anchor,
+  AnchorResolution,
+  CommentMap,
+  CommentStatus,
+  ParsedDoc,
+  ResolvedComment,
+  SuggestionResult,
+} from "./types";
 
 export const SCHEMA_HINT_LINES = [
-  '// Schema: { "<id>": { anchor:{exact,prefix,suffix,pos?}, status:open|resolved, thread:[{author,ts,text}] } }',
+  '// Schema: { "<id>": { anchor:{exact,prefix,suffix,pos?}, status:open|resolved, thread:[{author,ts,text}], suggestion?:{replacement,author,ts,result?} } }',
   '// Anchor = quote from the prose. To locate: search for "exact", disambiguate via prefix/suffix.',
 ];
 
@@ -71,7 +81,11 @@ export function serializeDocument(
 ): string {
   if (doc.error) throw new Error("refusing to serialize a document with a parse error: " + doc.error);
   const trailing = doc.trailing ?? "";
-  if (Object.keys(doc.comments).length === 0) return doc.prose + trailing;
+  if (Object.keys(doc.comments).length === 0) {
+    const separator =
+      doc.prose && trailing && !doc.prose.endsWith("\n") && !trailing.startsWith("\n") ? "\n" : "";
+    return doc.prose + separator + trailing;
+  }
   const hint = schemaHint ? SCHEMA_HINT_LINES.join("\n") + "\n" : "";
   return (
     doc.prose + "\n" + FENCE_OPEN + "\n" + hint + JSON.stringify(doc.comments, null, 2) + "\n```\n" + trailing
@@ -160,6 +174,23 @@ export function addComment(
   comments[id] = { anchor, status: "open", thread: [{ author, ts, text }] };
 }
 
+export function addSuggestion(
+  comments: CommentMap,
+  id: string,
+  anchor: Anchor,
+  author: string,
+  ts: string,
+  replacement: string,
+  note?: string
+): void {
+  comments[id] = {
+    anchor,
+    status: "open",
+    thread: note ? [{ author, ts, text: note }] : [],
+    suggestion: { replacement, author, ts },
+  };
+}
+
 export function addReply(comments: CommentMap, id: string, author: string, ts: string, text: string): void {
   const c = comments[id];
   if (!c) throw new Error(`tandem-comments: unknown comment id "${id}"`);
@@ -176,6 +207,154 @@ export function removeComment(comments: CommentMap, id: string): void {
   delete comments[id];
 }
 
+export type SuggestionFailureReason =
+  | "missing"
+  | "no-editor"
+  | "invalid-document"
+  | "invalid-suggestion"
+  | "not-suggestion"
+  | "already-resolved"
+  | "empty-replacement"
+  | "orphaned"
+  | "ambiguous";
+
+export type AcceptSuggestionResult =
+  | { ok: true; start: number; end: number; replacement: string }
+  | { ok: false; reason: SuggestionFailureReason };
+
+export type DeclineSuggestionResult = { ok: true } | { ok: false; reason: SuggestionFailureReason };
+
+export interface SuggestionTextChange {
+  from: number;
+  to: number;
+  insert: string;
+}
+
+export type SuggestionAcceptancePlan =
+  | {
+      ok: true;
+      changes: [SuggestionTextChange, SuggestionTextChange];
+      cursor: number;
+    }
+  | { ok: false; reason: SuggestionFailureReason; error?: string };
+
+function isSuggestionObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function finishSuggestion(
+  comments: CommentMap,
+  id: string,
+  result: SuggestionResult,
+  behavior: "keep" | "remove"
+): void {
+  if (behavior === "remove") {
+    delete comments[id];
+    return;
+  }
+  const comment = comments[id];
+  const suggestion: unknown = comment?.suggestion;
+  if (!comment || !isSuggestionObject(suggestion)) return;
+  comment.status = "resolved";
+  suggestion.result = result;
+}
+
+/**
+ * Applies an open replacement suggestion to a parsed document. The caller is
+ * responsible for committing the returned prose + comment-block changes as one
+ * editor transaction.
+ */
+export function acceptSuggestion(
+  doc: ParsedDoc,
+  id: string,
+  behavior: "keep" | "remove"
+): AcceptSuggestionResult {
+  const comment = doc.comments[id];
+  if (!comment) return { ok: false, reason: "missing" };
+  const suggestion: unknown = comment.suggestion;
+  if (suggestion === undefined) return { ok: false, reason: "not-suggestion" };
+  if (!isSuggestionObject(suggestion)) return { ok: false, reason: "invalid-suggestion" };
+  if (comment.status !== "open" || suggestion.result) {
+    return { ok: false, reason: "already-resolved" };
+  }
+  const replacement = suggestion.replacement;
+  if (typeof replacement !== "string") return { ok: false, reason: "invalid-suggestion" };
+  if (replacement.length === 0) return { ok: false, reason: "empty-replacement" };
+
+  const resolution = resolveAnchor(doc.prose, comment.anchor);
+  if (resolution.kind === "orphaned") return { ok: false, reason: "orphaned" };
+  if (resolution.ambiguous) return { ok: false, reason: "ambiguous" };
+  if (doc.prose.slice(resolution.start, resolution.end) !== comment.anchor.exact) {
+    return { ok: false, reason: "orphaned" };
+  }
+
+  const oldProse = doc.prose;
+  const survivingAnchors = Object.entries(doc.comments).flatMap(([otherId, other]) => {
+    if (otherId === id || other.status !== "open") return [];
+    const otherResolution = resolveAnchor(oldProse, other.anchor);
+    return otherResolution.kind === "resolved" && !otherResolution.ambiguous
+      ? [{ id: otherId, from: otherResolution.start, to: otherResolution.end }]
+      : [];
+  });
+  const replacementChange = ChangeSet.of(
+    { from: resolution.start, to: resolution.end, insert: replacement },
+    oldProse.length
+  );
+  doc.prose = oldProse.slice(0, resolution.start) + replacement + oldProse.slice(resolution.end);
+  for (const mapped of mapAnchors(survivingAnchors, replacementChange)) {
+    const surviving = doc.comments[mapped.id];
+    if (surviving && mapped.to <= doc.prose.length) {
+      surviving.anchor = makeAnchor(doc.prose, mapped.from, mapped.to);
+    }
+  }
+  finishSuggestion(doc.comments, id, "accepted", behavior);
+  return { ok: true, start: resolution.start, end: resolution.end, replacement };
+}
+
+export function declineSuggestion(
+  comments: CommentMap,
+  id: string,
+  behavior: "keep" | "remove"
+): DeclineSuggestionResult {
+  const comment = comments[id];
+  if (!comment) return { ok: false, reason: "missing" };
+  const suggestion: unknown = comment.suggestion;
+  if (suggestion === undefined) return { ok: false, reason: "not-suggestion" };
+  if (!isSuggestionObject(suggestion)) return { ok: false, reason: "invalid-suggestion" };
+  if (comment.status !== "open" || suggestion.result) {
+    return { ok: false, reason: "already-resolved" };
+  }
+  finishSuggestion(comments, id, "declined", behavior);
+  return { ok: true };
+}
+
+/**
+ * Plans the two simultaneous changes used by the editor: one replacement in
+ * the prose and one rewrite of the comment region. All coordinates refer to
+ * the original string, making the operation a single undoable transaction.
+ */
+export function planSuggestionAcceptance(
+  raw: string,
+  id: string,
+  behavior: "keep" | "remove",
+  schemaHint: boolean
+): SuggestionAcceptancePlan {
+  const doc = parseDocument(raw);
+  if (doc.error) return { ok: false, reason: "invalid-document", error: doc.error };
+  const oldProseLength = doc.prose.length;
+  const result = acceptSuggestion(doc, id, behavior);
+  if (!result.ok) return result;
+  const serialized = serializeDocument(doc, schemaHint);
+  return {
+    ok: true,
+    changes: [
+      { from: result.start, to: result.end, insert: result.replacement },
+      { from: oldProseLength, to: raw.length, insert: serialized.slice(doc.prose.length) },
+    ],
+    cursor: result.start + result.replacement.length,
+  };
+}
+
 export function generateId(existing: CommentMap): string {
   for (;;) {
     const id = Math.floor(Math.random() * 0xffff)
@@ -186,9 +365,17 @@ export function generateId(existing: CommentMap): string {
 }
 
 export function resolveAll(prose: string, comments: CommentMap): ResolvedComment[] {
-  return Object.entries(comments).map(([id, comment]) => ({
-    id,
-    comment,
-    resolution: resolveAnchor(prose, comment.anchor),
-  }));
+  return Object.entries(comments).map(([id, comment]) => {
+    const acceptedHistory =
+      comment.status === "resolved" &&
+      isSuggestionObject(comment.suggestion) &&
+      comment.suggestion.result === "accepted";
+    return {
+      id,
+      comment,
+      // The retained anchor describes the text that was replaced, not a safe
+      // navigation target in the resulting prose.
+      resolution: acceptedHistory ? { kind: "orphaned" } : resolveAnchor(prose, comment.anchor),
+    };
+  });
 }

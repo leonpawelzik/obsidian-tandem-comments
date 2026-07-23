@@ -1,7 +1,17 @@
 import { ItemView, Notice, TFile, WorkspaceLeaf } from "obsidian";
 import { formatComment, formatTs } from "./export";
 import type CommentsPlugin from "./main";
-import { addComment, addReply, generateId, removeComment, resolveAll, setStatus } from "./store";
+import {
+  addComment,
+  addReply,
+  addSuggestion,
+  declineSuggestion,
+  generateId,
+  removeComment,
+  resolveAll,
+  setStatus,
+  type SuggestionFailureReason,
+} from "./store";
 import type { Anchor, ResolvedComment } from "./types";
 
 export const VIEW_TYPE_COMMENTS = "tandem-comments-sidebar";
@@ -9,10 +19,34 @@ export const VIEW_TYPE_COMMENTS = "tandem-comments-sidebar";
 interface Draft {
   filePath: string;
   anchor: Anchor;
+  kind: "comment" | "suggestion";
 }
 
 function truncate(s: string, n: number): string {
   return s.length <= n ? s : s.slice(0, n - 1) + "…";
+}
+
+function suggestionFailureMessage(reason: SuggestionFailureReason): string {
+  switch (reason) {
+    case "no-editor":
+      return "Open this file in a Markdown editor before accepting the suggestion.";
+    case "invalid-document":
+      return "The tandem-comments block is invalid. Fix its JSON before accepting the suggestion.";
+    case "invalid-suggestion":
+      return "The suggestion data is invalid. Its replacement must be text.";
+    case "orphaned":
+      return "The original passage no longer exists. Re-anchor the suggestion before accepting it.";
+    case "ambiguous":
+      return "The original passage appears more than once. Re-anchor the suggestion before accepting it.";
+    case "empty-replacement":
+      return "Empty replacements are not supported yet.";
+    case "already-resolved":
+      return "This suggestion has already been resolved.";
+    case "not-suggestion":
+      return "This entry is not an edit suggestion.";
+    case "missing":
+      return "The suggestion or its editor is no longer available.";
+  }
 }
 
 export class CommentSidebar extends ItemView {
@@ -48,7 +82,12 @@ export class CommentSidebar extends ItemView {
   }
 
   startDraft(file: TFile, anchor: Anchor): void {
-    this.draft = { filePath: file.path, anchor };
+    this.draft = { filePath: file.path, anchor, kind: "comment" };
+    void this.render();
+  }
+
+  startSuggestionDraft(file: TFile, anchor: Anchor): void {
+    this.draft = { filePath: file.path, anchor, kind: "suggestion" };
     void this.render();
   }
 
@@ -64,7 +103,7 @@ export class CommentSidebar extends ItemView {
 
   /** Nicht neu rendern, während in einem Eingabefeld getippter Text verloren ginge. */
   private hasPendingInput(): boolean {
-    return Array.from(this.contentEl.querySelectorAll("textarea")).some((t) => t.value.trim() !== "");
+    return Array.from(this.contentEl.querySelectorAll("textarea")).some((t) => t.value.length > 0);
   }
 
   async render(): Promise<void> {
@@ -109,7 +148,7 @@ export class CommentSidebar extends ItemView {
     const done = all.filter((r) => r.comment.status === "resolved");
 
     if (!open.length && !orphans.length && !(this.showResolved && done.length) && !this.draft) {
-      container.createDiv({ text: "No comments in this file.", cls: "tc-empty" });
+      container.createDiv({ text: "No comments or suggestions in this file.", cls: "tc-empty" });
       return;
     }
 
@@ -130,6 +169,10 @@ export class CommentSidebar extends ItemView {
     if (!draft) return;
     const card = container.createDiv({ cls: "tc-card tc-draft" });
     card.createDiv({ text: `"${truncate(draft.anchor.exact, 80)}"`, cls: "tc-quote" });
+    if (draft.kind === "suggestion") {
+      this.renderSuggestionDraft(card, file, draft);
+      return;
+    }
     const input = card.createEl("textarea", {
       cls: "tc-input",
       attr: { placeholder: "Comment… (Enter = save, Esc = cancel)", rows: "3" },
@@ -164,10 +207,90 @@ export class CommentSidebar extends ItemView {
     };
   }
 
+  private renderSuggestionDraft(card: HTMLElement, file: TFile, draft: Draft): void {
+    card.createDiv({ text: "Suggested replacement", cls: "tc-field-label" });
+    const replacement = card.createEl("textarea", {
+      cls: "tc-input",
+      attr: { placeholder: "Replacement text…", rows: "3", "aria-label": "Suggested replacement" },
+    });
+    card.createDiv({ text: "Explanation (optional)", cls: "tc-field-label" });
+    const note = card.createEl("textarea", {
+      cls: "tc-input",
+      attr: { placeholder: "Why this change?", rows: "2", "aria-label": "Suggestion explanation" },
+    });
+    const actions = card.createDiv({ cls: "tc-actions" });
+    const save = actions.createEl("button", { text: "Add suggestion", cls: "mod-cta" });
+    const cancel = actions.createEl("button", { text: "Cancel" });
+
+    const submit = (): void => {
+      if (save.disabled) return;
+      if (replacement.value.length === 0) {
+        new Notice("Enter replacement text first.");
+        replacement.focus();
+        return;
+      }
+      save.disabled = true;
+      const proposedText = replacement.value;
+      const explanation = note.value.trim();
+      void this.plugin
+        .updateDoc(file, (d) => {
+          addSuggestion(
+            d.comments,
+            generateId(d.comments),
+            draft.anchor,
+            this.plugin.currentAuthor(),
+            this.plugin.nowTs(),
+            proposedText,
+            explanation || undefined
+          );
+        })
+        .then((ok) => {
+          if (ok) {
+            this.draft = null;
+            void this.render();
+          } else {
+            save.disabled = false;
+          }
+        });
+    };
+
+    save.onclick = submit;
+    cancel.onclick = () => {
+      this.draft = null;
+      void this.render();
+    };
+    replacement.onkeydown = (e) => {
+      if (e.key === "Escape") {
+        this.draft = null;
+        void this.render();
+      } else if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+        e.preventDefault();
+        submit();
+      }
+    };
+    note.onkeydown = (e) => {
+      if (e.key === "Escape") {
+        this.draft = null;
+        void this.render();
+      } else if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+        e.preventDefault();
+        submit();
+      }
+    };
+    window.setTimeout(() => replacement.focus(), 0);
+  }
+
   private renderComment(container: HTMLElement, file: TFile, r: ResolvedComment): void {
     const cls = ["tc-card"];
     if (r.comment.status === "resolved") cls.push("tc-resolved");
-    if (r.resolution.kind === "orphaned") cls.push("tc-orphan");
+    if (
+      r.resolution.kind === "orphaned" &&
+      !(r.comment.suggestion?.result === "accepted" && r.comment.status === "resolved")
+    ) {
+      cls.push("tc-orphan");
+    }
+    if (r.comment.suggestion) cls.push("tc-suggestion-card");
+    if (r.resolution.kind === "resolved" && r.resolution.ambiguous) cls.push("tc-ambiguous");
     const card = container.createDiv({ cls: cls.join(" ") });
     if (r.id === this.focusedId) {
       card.addClass("tc-focused");
@@ -175,10 +298,62 @@ export class CommentSidebar extends ItemView {
       this.focusedId = null;
     }
 
-    const quote = card.createDiv({ text: `"${truncate(r.comment.anchor.exact, 80)}"`, cls: "tc-quote" });
-    if (r.resolution.kind === "resolved") {
-      quote.addClass("tc-quote-link");
-      quote.onclick = () => this.plugin.revealAnchor(file, r.comment.anchor);
+    if (r.comment.suggestion) {
+      const suggestion = r.comment.suggestion;
+      const replacement =
+        typeof suggestion.replacement === "string" ? suggestion.replacement : "";
+      const suggestionResult =
+        suggestion.result === "accepted" || suggestion.result === "declined"
+          ? suggestion.result
+          : undefined;
+      const heading = card.createDiv({ cls: "tc-suggestion-heading" });
+      heading.createSpan({ text: "Suggested edit", cls: "tc-suggestion-title" });
+      if (suggestionResult) {
+        heading.createSpan({
+          text: suggestionResult === "accepted" ? "Accepted" : "Declined",
+          cls: `tc-suggestion-result tc-suggestion-${suggestionResult}`,
+        });
+      }
+      const meta = card.createDiv({ cls: "tc-meta" });
+      meta.createSpan({ text: suggestion.author, cls: "tc-author" });
+      meta.createSpan({ text: formatTs(suggestion.ts), cls: "tc-ts" });
+      const change = card.createDiv({ cls: "tc-suggestion-change" });
+      const original = change.createDiv({ text: r.comment.anchor.exact, cls: "tc-suggestion-original" });
+      if (r.resolution.kind === "resolved") {
+        original.addClass("tc-quote-link");
+        original.onclick = () => this.plugin.revealAnchor(file, r.comment.anchor);
+      }
+      change.createDiv({ text: "↓", cls: "tc-suggestion-arrow", attr: { "aria-hidden": "true" } });
+      change.createDiv({
+        text: replacement || (typeof suggestion.replacement === "string" ? "" : "Invalid replacement data"),
+        cls: "tc-suggestion-replacement",
+      });
+      if (r.comment.status === "open" && r.resolution.kind === "orphaned") {
+        card.createDiv({ text: "Original passage not found.", cls: "tc-suggestion-warning" });
+      } else if (
+        r.comment.status === "open" &&
+        r.resolution.kind === "resolved" &&
+        r.resolution.ambiguous
+      ) {
+        card.createDiv({
+          text: "Original passage appears more than once. Re-anchor before accepting.",
+          cls: "tc-suggestion-warning",
+        });
+      } else if (r.comment.status === "open" && replacement.length === 0) {
+        card.createDiv({
+          text:
+            typeof suggestion.replacement === "string"
+              ? "Empty replacements are not supported yet."
+              : "Replacement must be text.",
+          cls: "tc-suggestion-warning",
+        });
+      }
+    } else {
+      const quote = card.createDiv({ text: `"${truncate(r.comment.anchor.exact, 80)}"`, cls: "tc-quote" });
+      if (r.resolution.kind === "resolved") {
+        quote.addClass("tc-quote-link");
+        quote.onclick = () => this.plugin.revealAnchor(file, r.comment.anchor);
+      }
     }
 
     for (const entry of r.comment.thread) {
@@ -190,18 +365,44 @@ export class CommentSidebar extends ItemView {
     }
 
     const actions = card.createDiv({ cls: "tc-actions" });
-    if (r.comment.status === "open") {
+    if (r.comment.status === "open" && r.comment.suggestion && !r.comment.suggestion.result) {
+      const canAccept =
+        r.resolution.kind === "resolved" &&
+        !r.resolution.ambiguous &&
+        typeof r.comment.suggestion.replacement === "string" &&
+        r.comment.suggestion.replacement.length > 0;
+      const acceptBtn = actions.createEl("button", { text: "Accept", cls: "mod-cta" });
+      acceptBtn.disabled = !canAccept;
+      acceptBtn.onclick = () => {
+        const result = this.plugin.acceptEditSuggestion(file, r.id);
+        if (!result.ok) {
+          new Notice(suggestionFailureMessage(result.reason));
+          return;
+        }
+        card.remove();
+      };
+      const declineBtn = actions.createEl("button", { text: "Decline" });
+      declineBtn.onclick = () =>
+        void this.plugin.updateDoc(file, (d) => {
+          const result = declineSuggestion(d.comments, r.id, this.plugin.settings.resolveBehavior);
+          if (!result.ok) new Notice(suggestionFailureMessage(result.reason));
+        });
+    } else if (r.comment.status === "open" && !r.comment.suggestion) {
       const resolveBtn = actions.createEl("button", { text: "Resolve" });
       resolveBtn.onclick = () =>
         void this.plugin.updateDoc(file, (d) => {
           if (this.plugin.settings.resolveBehavior === "remove") removeComment(d.comments, r.id);
           else setStatus(d.comments, r.id, "resolved");
         });
-    } else {
+    } else if (!r.comment.suggestion) {
       const reopenBtn = actions.createEl("button", { text: "Reopen" });
       reopenBtn.onclick = () => void this.plugin.updateDoc(file, (d) => setStatus(d.comments, r.id, "open"));
     }
-    if (r.resolution.kind === "orphaned") {
+    if (
+      r.comment.status === "open" &&
+      (r.resolution.kind === "orphaned" ||
+        (r.comment.suggestion && r.resolution.kind === "resolved" && r.resolution.ambiguous))
+    ) {
       const reBtn = actions.createEl("button", { text: "Re-anchor to selection" });
       reBtn.onclick = () => this.reanchorFromSelection(file, r.id);
     }
@@ -209,7 +410,7 @@ export class CommentSidebar extends ItemView {
     copyBtn.onclick = () =>
       void navigator.clipboard
         .writeText(formatComment(r, { includeQuote: this.plugin.settings.copyIncludeQuote, formatTs }))
-        .then(() => new Notice("Comment copied."));
+        .then(() => new Notice("Thread copied."));
     const delBtn = actions.createEl("button", { text: "Delete" });
     delBtn.onclick = () => void this.plugin.updateDoc(file, (d) => removeComment(d.comments, r.id));
 

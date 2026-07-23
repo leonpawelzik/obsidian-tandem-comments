@@ -9,6 +9,7 @@ function rc(over: Partial<ResolvedComment["comment"]> & { id?: string; start?: n
       anchor: over.anchor ?? { exact: "the quoted passage" },
       status: over.status ?? "open",
       thread: over.thread ?? [{ author: "Me", ts: "2026-06-12T10:30:00Z", text: "Tighten this." }],
+      suggestion: over.suggestion,
     },
     resolution: over.orphaned
       ? { kind: "orphaned" }
@@ -48,6 +49,69 @@ describe("formatComment", () => {
   it("uses the provided timestamp formatter", () => {
     const out = formatComment(rc({}), { includeQuote: false, formatTs: () => "formatted" });
     expect(out).toBe("**Me** (formatted): Tighten this.");
+  });
+
+  it("includes edit suggestion metadata, replacement and discussion", () => {
+    const out = formatComment(
+      rc({
+        anchor: { exact: "cut prices hard" },
+        suggestion: {
+          replacement: "reduce prices\nsignificantly",
+          author: "Claude",
+          ts: "suggested-at",
+        },
+        thread: [{ author: "Claude", ts: "thread-at", text: "Less abrupt." }],
+      }),
+      { includeQuote: true }
+    );
+    expect(out).toBe(
+      [
+        "> cut prices hard",
+        "",
+        "**Suggested edit by Claude** (suggested-at):",
+        "> reduce prices",
+        "> significantly",
+        "",
+        "**Claude** (thread-at): Less abrupt.",
+      ].join("\n")
+    );
+  });
+
+  it("marks retained suggestion outcomes and can omit the original quote", () => {
+    const out = formatComment(
+      rc({
+        status: "resolved",
+        suggestion: {
+          replacement: "new wording",
+          author: "Leon",
+          ts: "t1",
+          result: "accepted",
+        },
+        thread: [],
+      }),
+      { includeQuote: false }
+    );
+    expect(out).toBe("**Suggested edit by Leon** (t1) — accepted:\n> new wording");
+  });
+
+  it("formats a malformed non-text replacement without throwing", () => {
+    const malformed = rc({
+      suggestion: {
+        replacement: 42,
+        author: "AI",
+        ts: "t1",
+      } as unknown as ResolvedComment["comment"]["suggestion"],
+      thread: [],
+    });
+    expect(() => formatComment(malformed, { includeQuote: true })).not.toThrow();
+    expect(formatComment(malformed, { includeQuote: true })).toContain(
+      "> [Invalid suggestion: replacement must be text]"
+    );
+    const exported = buildExportNote("Draft", [malformed], {
+      scope: "all",
+      date: "2026-07-23",
+    });
+    expect(exported).toContain("> [Invalid suggestion: replacement must be text]");
   });
 });
 
@@ -113,5 +177,23 @@ describe("buildExportNote", () => {
 
   it("returns null for an empty comment list", () => {
     expect(buildExportNote("Draft", [], { scope: "all", date: "2026-06-12" })).toBeNull();
+  });
+
+  it("exports open edit suggestions with their replacement", () => {
+    const out = buildExportNote(
+      "Draft",
+      [
+        rc({
+          suggestion: {
+            replacement: "replacement copy",
+            author: "Claude",
+            ts: "t1",
+          },
+        }),
+      ],
+      { scope: "all", date: "2026-06-12" }
+    );
+    expect(out).toContain("**Suggested edit by Claude**");
+    expect(out).toContain("> replacement copy");
   });
 });

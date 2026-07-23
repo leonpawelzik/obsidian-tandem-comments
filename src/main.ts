@@ -5,11 +5,21 @@ import { buildExportNote, formatTs, renderExportFileName } from "./export";
 import { registerReadingView } from "./reading-view";
 import { CommentsSettingTab, CommentsSettings, DEFAULT_SETTINGS } from "./settings";
 import { CommentSidebar, VIEW_TYPE_COMMENTS } from "./sidebar";
-import { makeAnchor, parseDocument, resolveAll, resolveAnchor, serializeDocument } from "./store";
+import { commitSuggestionAcceptance } from "./suggestion-editor";
+import {
+  type SuggestionAcceptancePlan,
+  makeAnchor,
+  parseDocument,
+  planSuggestionAcceptance,
+  resolveAll,
+  resolveAnchor,
+  serializeDocument,
+} from "./store";
 import type { Anchor, ParsedDoc } from "./types";
 
 export default class CommentsPlugin extends Plugin {
   settings: CommentsSettings = DEFAULT_SETTINGS;
+  private applyingSuggestion = false;
 
   async onload(): Promise<void> {
     await this.loadSettings();
@@ -27,6 +37,12 @@ export default class CommentsPlugin extends Plugin {
       editorCallback: (editor) => this.addCommentFromSelection(editor),
     });
     this.addCommand({
+      id: "suggest-edit",
+      name: "Suggest edit",
+      icon: "replace",
+      editorCallback: (editor) => this.addSuggestionFromSelection(editor),
+    });
+    this.addCommand({
       id: "open-sidebar",
       name: "Open comment sidebar",
       icon: "message-square",
@@ -34,13 +50,13 @@ export default class CommentsPlugin extends Plugin {
     });
     this.addCommand({
       id: "toggle-resolved",
-      name: "Toggle resolved comments",
+      name: "Toggle resolved threads",
       icon: "check-check",
       callback: () => void this.openSidebar().then((v) => v?.toggleResolved()),
     });
     this.addCommand({
       id: "purge-resolved",
-      name: "Remove resolved comments from file",
+      name: "Remove resolved threads from file",
       icon: "trash-2",
       callback: () => {
         const file = this.app.workspace.getActiveFile();
@@ -53,14 +69,14 @@ export default class CommentsPlugin extends Plugin {
               n++;
             }
           }
-          new Notice(n > 0 ? `${n} resolved comment${n === 1 ? "" : "s"} removed.` : "No resolved comments in this file.");
+          new Notice(n > 0 ? `${n} resolved thread${n === 1 ? "" : "s"} removed.` : "No resolved threads in this file.");
         });
       },
     });
 
     this.addCommand({
       id: "export-comments",
-      name: "Export comments of active file",
+      name: "Export review threads of active file",
       icon: "file-output",
       callback: () => {
         const file = this.app.workspace.getActiveFile();
@@ -80,6 +96,12 @@ export default class CommentsPlugin extends Plugin {
             .setTitle("Add comment")
             .setIcon("message-square")
             .onClick(() => this.addCommentFromSelection(editor))
+        );
+        menu.addItem((item) =>
+          item
+            .setTitle("Suggest edit")
+            .setIcon("replace")
+            .onClick(() => this.addSuggestionFromSelection(editor))
         );
       })
     );
@@ -200,7 +222,7 @@ export default class CommentsPlugin extends Plugin {
       formatTs,
     });
     if (!content) {
-      new Notice("No comments to export.");
+      new Notice("No review threads to export.");
       return;
     }
     const name = renderExportFileName(this.settings.exportNameTemplate, file.basename, date);
@@ -216,34 +238,81 @@ export default class CommentsPlugin extends Plugin {
       new Notice("Export target is a folder: " + path);
       return;
     } else await this.app.vault.create(path, content);
-    new Notice("Comments exported to " + path);
+    new Notice("Review threads exported to " + path);
   }
 
   addCommentFromSelection(editor: Editor): void {
     const file = this.app.workspace.getActiveFile();
     if (!file) return;
+    const anchor = this.anchorFromSelection(editor);
+    if (!anchor) return;
+    void this.openSidebar().then((view) => view?.startDraft(file, anchor));
+  }
+
+  addSuggestionFromSelection(editor: Editor): void {
+    const file = this.app.workspace.getActiveFile();
+    if (!file) return;
+    const anchor = this.anchorFromSelection(editor);
+    if (!anchor) return;
+    void this.openSidebar().then((view) => view?.startSuggestionDraft(file, anchor));
+  }
+
+  private anchorFromSelection(editor: Editor): Anchor | null {
     if (!editor.somethingSelected()) {
       new Notice("Select some text first.");
-      return;
+      return null;
     }
     const from = editor.posToOffset(editor.getCursor("from"));
     const to = editor.posToOffset(editor.getCursor("to"));
     const doc = parseDocument(editor.getValue());
     if (to > doc.prose.length) {
-      new Notice("Only prose can be commented (not the comment block).");
-      return;
+      new Notice("Only prose can be commented or suggested (not the comment block).");
+      return null;
     }
-    const anchor = makeAnchor(doc.prose, from, to);
-    void this.openSidebar().then((view) => view?.startDraft(file, anchor));
+    return makeAnchor(doc.prose, from, to);
+  }
+
+  private editorForFile(file: TFile): Editor | null {
+    const active = this.app.workspace.getActiveViewOfType(MarkdownView);
+    if (active?.file?.path === file.path) return active.editor;
+    const leaf = this.app.workspace
+      .getLeavesOfType("markdown")
+      .find((l) => l.view instanceof MarkdownView && l.view.file?.path === file.path);
+    return leaf ? (leaf.view as MarkdownView).editor : null;
+  }
+
+  /**
+   * Applies the prose replacement and comment-block mutation as one editor
+   * transaction, so a single Undo restores both the text and the suggestion.
+   */
+  isApplyingSuggestion(): boolean {
+    return this.applyingSuggestion;
+  }
+
+  acceptEditSuggestion(file: TFile, id: string): SuggestionAcceptancePlan {
+    const editor = this.editorForFile(file);
+    if (!editor) return { ok: false, reason: "no-editor" };
+    const raw = editor.getValue();
+    const plan = planSuggestionAcceptance(
+      raw,
+      id,
+      this.settings.resolveBehavior,
+      this.settings.schemaHint
+    );
+    if (!plan.ok) return plan;
+    this.applyingSuggestion = true;
+    try {
+      commitSuggestionAcceptance(editor, plan);
+    } finally {
+      this.applyingSuggestion = false;
+    }
+    return plan;
   }
 
   /** Aktuelle Editor-Selektion als Anker (für Re-Anchoring von Orphans). */
   getProseSelection(file: TFile): { anchor: Anchor } | null {
-    const leaf = this.app.workspace
-      .getLeavesOfType("markdown")
-      .find((l) => l.view instanceof MarkdownView && l.view.file?.path === file.path);
-    if (!leaf) return null;
-    const editor = (leaf.view as MarkdownView).editor;
+    const editor = this.editorForFile(file);
+    if (!editor) return null;
     if (!editor.somethingSelected()) return null;
     const from = editor.posToOffset(editor.getCursor("from"));
     const to = editor.posToOffset(editor.getCursor("to"));
@@ -282,7 +351,7 @@ export default class CommentsPlugin extends Plugin {
     const doc = parseDocument(editor.getValue());
     const r = resolveAnchor(doc.prose, anchor);
     if (r.kind !== "resolved") {
-      new Notice("Comment is orphaned — text passage not found.");
+      new Notice("Thread is orphaned — text passage not found.");
       return;
     }
     const fromPos = editor.offsetToPos(r.start);

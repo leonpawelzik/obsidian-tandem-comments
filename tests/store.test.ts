@@ -162,6 +162,13 @@ describe("serializeDocument", () => {
     expect(serializeDocument({ ...doc, comments: {} }, true)).toBe("Text[^1]\n[^1]: Fußnote\n");
   });
 
+  it("restores the separator supplied by the closing fence before trailing content", () => {
+    const raw = "Text[^1]\n" + block(JSON.stringify(COMMENTS, null, 2)) + "[^1]: Fußnote\n";
+    const doc = parseDocument(raw);
+    expect(doc.trailing).toBe("[^1]: Fußnote\n");
+    expect(serializeDocument({ ...doc, comments: {} }, true)).toBe("Text[^1]\n[^1]: Fußnote\n");
+  });
+
   it("throws when asked to serialize a doc with parse error", () => {
     expect(() => serializeDocument({ prose: "x", comments: {}, error: "kaputt" }, true)).toThrow();
   });
