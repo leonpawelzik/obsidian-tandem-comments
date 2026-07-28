@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   addComment,
   addReply,
+  addSuggestion,
   editEntry,
   generateId,
   removeComment,
@@ -106,6 +107,23 @@ describe("mutations", () => {
 
   it("removeEntry throws for out-of-range index", () => {
     expect(() => removeEntry(sample(), "a1f3", 5)).toThrow();
+  });
+
+  it("removeEntry on a suggestion's explanation keeps the suggestion", () => {
+    const c: CommentMap = {};
+    addSuggestion(
+      c,
+      "s1",
+      { exact: "abc" },
+      "Claude",
+      "2026-06-10T00:00:00Z",
+      "replacement",
+      "why this change"
+    );
+    removeEntry(c, "s1", 0);
+    expect(c.s1).toBeDefined();
+    expect(c.s1.suggestion?.replacement).toBe("replacement");
+    expect(c.s1.thread).toHaveLength(0);
   });
 
   it("generateId returns 4-char hex ids not colliding with existing", () => {

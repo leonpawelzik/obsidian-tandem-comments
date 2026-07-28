@@ -217,7 +217,10 @@ export function removeEntry(comments: CommentMap, id: string, index: number): vo
   if (!c.thread[index]) {
     throw new Error(`tandem-comments: thread entry ${index} out of range for comment "${id}"`);
   }
-  if (index === 0) {
+  // Deleting a plain comment's root entry deletes the thread it heads. A suggestion's
+  // thread[0] is only its optional explanation, so removing it must leave the
+  // suggestion itself intact — use the card-level Delete to discard a suggestion.
+  if (index === 0 && !c.suggestion) {
     delete comments[id];
     return;
   }
