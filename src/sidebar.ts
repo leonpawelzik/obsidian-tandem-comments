@@ -78,6 +78,8 @@ export class CommentSidebar extends ItemView {
   private draft: Draft | null = null;
   private showResolved: boolean;
   private focusedId: string | null = null;
+  /** After a reply (or focus), scroll this card’s latest entry into view. */
+  private revealThreadEndId: string | null = null;
 
   constructor(leaf: WorkspaceLeaf, private plugin: CommentsPlugin) {
     super(leaf);
@@ -123,6 +125,7 @@ export class CommentSidebar extends ItemView {
 
   focusComment(id: string): void {
     this.focusedId = id;
+    this.revealThreadEndId = id;
     void this.render();
   }
 
@@ -436,9 +439,10 @@ export class CommentSidebar extends ItemView {
     };
     if (r.id === this.focusedId) {
       card.addClass("tc-focused");
-      window.setTimeout(() => card.scrollIntoView({ block: "nearest" }), 0);
       this.focusedId = null;
     }
+    const shouldRevealEnd = r.id === this.revealThreadEndId;
+    if (shouldRevealEnd) this.revealThreadEndId = null;
 
     if (r.comment.suggestion) {
       const suggestion = r.comment.suggestion;
@@ -523,8 +527,12 @@ export class CommentSidebar extends ItemView {
       }
     }
 
+    // Thread body → reply composer → actions. Keeping the composer directly under
+    // the latest entry avoids Resolve/Copy/Delete sitting between the conversation
+    // and the input (which scrolled the latest message out of view under the reply box).
+    const thread = card.createDiv({ cls: "tc-thread" });
     for (const [entryIndex, entry] of r.comment.thread.entries()) {
-      const row = card.createDiv({ cls: "tc-entry" });
+      const row = thread.createDiv({ cls: "tc-entry" });
       const meta = row.createDiv({ cls: "tc-meta" });
       paintAuthor(
         meta.createSpan({ text: entry.author, cls: "tc-author" }),
@@ -633,6 +641,39 @@ export class CommentSidebar extends ItemView {
       };
     }
 
+    if (r.comment.status === "open") {
+      const replyWrap = card.createDiv({ cls: "tc-reply" });
+      const reply = replyWrap.createEl("textarea", {
+        cls: "tc-input tc-reply-input",
+        attr: {
+          placeholder:
+            this.plugin.settings.submitShortcut === "enter"
+              ? "Reply… (Enter = send)"
+              : "Reply… (Cmd/Ctrl+Enter = send)",
+          rows: "2",
+          "aria-label": "Reply to thread",
+        },
+      });
+      reply.onkeydown = (e) => {
+        if (this.shouldSubmit(e)) {
+          e.preventDefault();
+          const text = reply.value.trim();
+          if (!text) return;
+          reply.value = "";
+          this.revealThreadEndId = r.id;
+          void this.plugin
+            .updateDoc(file, (d) =>
+              addReply(d.comments, r.id, this.plugin.currentAuthor(), this.plugin.nowTs(), text)
+            )
+            .then((ok) => {
+              // Force a paint even if vault.modify coalesces oddly; revealThreadEndId
+              // scrolls the new latest entry into view above the composer.
+              if (ok) void this.render();
+            });
+        }
+      };
+    }
+
     const actions = card.createDiv({ cls: "tc-actions" });
     if (r.comment.status === "open" && r.comment.suggestion && !r.comment.suggestion.result) {
       const canAccept =
@@ -683,28 +724,15 @@ export class CommentSidebar extends ItemView {
       reBtn.onclick = () => this.reanchorFromSelection(file, r.id);
     }
     if (!actions.hasChildNodes()) actions.remove();
-    if (r.comment.status === "open") {
-      const reply = card.createEl("textarea", {
-        cls: "tc-input",
-        attr: {
-          placeholder:
-            this.plugin.settings.submitShortcut === "enter"
-              ? "Reply… (Enter = send)"
-              : "Reply… (Cmd/Ctrl+Enter = send)",
-          rows: "2",
-        },
-      });
-      reply.onkeydown = (e) => {
-        if (this.shouldSubmit(e)) {
-          e.preventDefault();
-          const text = reply.value.trim();
-          if (!text) return;
-          reply.value = "";
-          void this.plugin.updateDoc(file, (d) =>
-            addReply(d.comments, r.id, this.plugin.currentAuthor(), this.plugin.nowTs(), text)
-          );
-        }
-      };
+
+    if (shouldRevealEnd) {
+      window.setTimeout(() => {
+        const latest =
+          card.querySelector<HTMLElement>(".tc-entry:last-child") ??
+          card.querySelector<HTMLElement>(".tc-reply") ??
+          card;
+        latest.scrollIntoView({ block: "nearest" });
+      }, 0);
     }
   }
 

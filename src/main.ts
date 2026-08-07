@@ -278,7 +278,22 @@ export default class CommentsPlugin extends Plugin {
     }
     mutate(doc);
     const out = serializeDocument(doc, this.settings.schemaHint);
-    if (out !== raw) await this.app.vault.modify(file, out);
+    if (out !== raw) {
+      // Align any open editor buffer before vault.modify so a sidebar re-render
+      // that races the external-change round-trip still sees the new thread entry
+      // (otherwise the latest reply can vanish while the reply field remains).
+      const editor = this.editorForFile(file);
+      if (editor && editor.getValue() !== out) {
+        const cursor = editor.getCursor();
+        editor.setValue(out);
+        try {
+          editor.setCursor(cursor);
+        } catch {
+          /* cursor may be past EOF if the file shrank */
+        }
+      }
+      await this.app.vault.modify(file, out);
+    }
     return true;
   }
 
