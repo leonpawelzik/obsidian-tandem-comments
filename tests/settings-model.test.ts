@@ -39,6 +39,7 @@ describe("settings model", () => {
       exportDestination: "folder",
       exportFolder: "/Reviews/Team/",
       authorColorOverrides: { Leon: "#ABCDEF" },
+      debugPerf: true,
     });
 
     expect(result.settings).toMatchObject({
@@ -60,6 +61,7 @@ describe("settings model", () => {
       exportDestination: "folder",
       exportFolder: "Reviews/Team",
       authorColorOverrides: { Leon: "#abcdef" },
+      debugPerf: true,
     });
   });
 

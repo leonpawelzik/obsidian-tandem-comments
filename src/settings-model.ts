@@ -28,6 +28,8 @@ export interface CommentsSettings {
   exportDestination: ExportDestination;
   exportFolder: string;
   authorColorOverrides: AuthorColorOverrides;
+  /** When true, record keystroke/persist counters and log budget overruns to the console. */
+  debugPerf: boolean;
 }
 
 export const DEFAULT_SETTINGS: CommentsSettings = {
@@ -49,6 +51,7 @@ export const DEFAULT_SETTINGS: CommentsSettings = {
   exportDestination: "source",
   exportFolder: "",
   authorColorOverrides: {},
+  debugPerf: false,
 };
 
 export interface ParsedCommentsSettings {
@@ -158,6 +161,7 @@ export function parseCommentsSettings(value: unknown): ParsedCommentsSettings {
         ? normalizeVaultFolderPath(raw.exportFolder)
         : DEFAULT_SETTINGS.exportFolder,
     authorColorOverrides: normalizeAuthorColorOverrides(raw.authorColorOverrides),
+    debugPerf: booleanSetting(raw.debugPerf, DEFAULT_SETTINGS.debugPerf),
   };
   const legacyAuthorName = typeof raw.authorName === "string" ? raw.authorName.trim() : undefined;
   return {

@@ -14,6 +14,7 @@ import {
   renderExportFileName,
   resolveExportDirectory,
 } from "./export";
+import { formatPerfSnapshot, resetPerf, setPerfEnabled } from "./perf";
 import { registerReadingView } from "./reading-view";
 import { CommentsSettingTab } from "./settings";
 import {
@@ -94,6 +95,29 @@ export default class CommentsPlugin extends Plugin {
         void this.exportComments(file);
       },
     });
+    this.addCommand({
+      id: "show-perf-counters",
+      name: "Show performance counters",
+      icon: "gauge",
+      callback: () => {
+        if (!this.settings.debugPerf) {
+          new Notice("Enable “Debug performance counters” in Tandem Comments settings first.");
+          return;
+        }
+        const line = formatPerfSnapshot();
+        console.info("[tandem-perf]", line);
+        new Notice(line, 8000);
+      },
+    });
+    this.addCommand({
+      id: "reset-perf-counters",
+      name: "Reset performance counters",
+      icon: "rotate-ccw",
+      callback: () => {
+        resetPerf();
+        new Notice(this.settings.debugPerf ? "Performance counters reset." : "Counters cleared (debug is off).");
+      },
+    });
 
     this.registerEvent(
       this.app.workspace.on("editor-menu", (menu, editor) => {
@@ -133,6 +157,7 @@ export default class CommentsPlugin extends Plugin {
     const parsed = parseCommentsSettings(await this.loadData());
     this.migrateLegacyAuthorName(parsed.legacyAuthorName);
     this.settings = parsed.settings;
+    setPerfEnabled(!!this.settings.debugPerf);
     if (parsed.changed) await this.saveData(this.settings);
   }
 
@@ -140,6 +165,8 @@ export default class CommentsPlugin extends Plugin {
     const previous = this.settings;
     const next = parseCommentsSettings({ ...previous, ...patch }).settings;
     this.settings = next;
+    setPerfEnabled(!!next.debugPerf);
+    if (next.debugPerf && !previous.debugPerf) resetPerf();
     const write = this.settingsWriteQueue
       .catch(() => undefined)
       .then(() => this.saveData(next));

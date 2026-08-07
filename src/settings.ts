@@ -15,6 +15,7 @@ import {
 } from "./author-color";
 import { renderExportFileName } from "./export";
 import type CommentsPlugin from "./main";
+import { formatPerfSnapshot, getPerfSnapshot, resetPerf, setPerfEnabled } from "./perf";
 import {
   DEFAULT_SETTINGS,
   normalizeVaultFolderPath,
@@ -306,6 +307,40 @@ export class CommentsSettingTab extends PluginSettingTab {
             } catch (error) {
               new Notice("Export failed: " + (error instanceof Error ? error.message : String(error)));
             }
+          })
+        );
+    }
+
+    new Setting(containerEl)
+      .setName("Debug performance counters")
+      .setDesc(
+        "Off by default (zero overhead). When on, counts editor updates, parses, sidebar render/skip, " +
+          "and decoration map vs rebuild; over-budget work logs to the developer console. " +
+          "Use the command “Show performance counters” to print a snapshot."
+      )
+      .addToggle((toggle) =>
+        toggle.setValue(this.plugin.settings.debugPerf).onChange(async (value) => {
+          setPerfEnabled(value);
+          if (value) resetPerf();
+          await this.plugin.updateSettings({ debugPerf: value });
+          this.redisplayPreservingScroll();
+        })
+      );
+
+    if (this.plugin.settings.debugPerf) {
+      new Setting(containerEl)
+        .setName("Performance snapshot")
+        .setDesc(formatPerfSnapshot(getPerfSnapshot()))
+        .addButton((button) =>
+          button.setButtonText("Reset counters").onClick(() => {
+            resetPerf();
+            this.redisplayPreservingScroll();
+          })
+        )
+        .addButton((button) =>
+          button.setButtonText("Copy snapshot").onClick(async () => {
+            await navigator.clipboard.writeText(formatPerfSnapshot());
+            new Notice("Performance snapshot copied.");
           })
         );
     }

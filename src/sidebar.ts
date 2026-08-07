@@ -3,7 +3,9 @@ import { resolveAuthorColor, type AuthorColorOverrides } from "./author-color";
 import { confirmAction } from "./confirm-action";
 import { formatComment, formatTs } from "./export";
 import type CommentsPlugin from "./main";
+import { recordSidebarRender, recordSidebarSkip } from "./perf";
 import { shouldSubmitComment, sortSidebarComments } from "./sidebar-preferences";
+import { sidebarContentSignature, type SidebarDraft } from "./sidebar-signature";
 import { formatSidebarTimestamp } from "./timestamp";
 import {
   addComment,
@@ -22,11 +24,7 @@ import type { Anchor, ResolvedComment } from "./types";
 
 export const VIEW_TYPE_COMMENTS = "tandem-comments-sidebar";
 
-interface Draft {
-  filePath: string;
-  anchor: Anchor;
-  kind: "comment" | "suggestion";
-}
+type Draft = SidebarDraft;
 
 function truncate(s: string, n: number): string {
   return s.length <= n ? s : s.slice(0, n - 1) + "…";
@@ -80,6 +78,8 @@ export class CommentSidebar extends ItemView {
   private focusedId: string | null = null;
   /** After a reply (or focus), scroll this card’s latest entry into view. */
   private revealThreadEndId: string | null = null;
+  /** Last rendered UI signature — skip empty()+rebuild when unchanged. */
+  private lastContentSignature: string | null = null;
 
   constructor(leaf: WorkspaceLeaf, private plugin: CommentsPlugin) {
     super(leaf);
@@ -115,28 +115,28 @@ export class CommentSidebar extends ItemView {
 
   startDraft(file: TFile, anchor: Anchor): void {
     this.draft = { filePath: file.path, anchor, kind: "comment" };
-    void this.render();
+    void this.render({ force: true });
   }
 
   startSuggestionDraft(file: TFile, anchor: Anchor): void {
     this.draft = { filePath: file.path, anchor, kind: "suggestion" };
-    void this.render();
+    void this.render({ force: true });
   }
 
   focusComment(id: string): void {
     this.focusedId = id;
     this.revealThreadEndId = id;
-    void this.render();
+    void this.render({ force: true });
   }
 
   toggleResolved(): void {
     this.showResolved = !this.showResolved;
-    void this.render();
+    void this.render({ force: true });
   }
 
   settingsChanged(resetResolved: boolean): void {
     if (resetResolved) this.showResolved = this.plugin.settings.showResolvedByDefault;
-    void this.render();
+    void this.render({ force: true });
   }
 
   refreshAuthorColors(): void {
@@ -160,18 +160,30 @@ export class CommentSidebar extends ItemView {
     );
   }
 
-  async render(): Promise<void> {
+  async render(opts?: { force?: boolean }): Promise<void> {
     const container = this.contentEl;
-    const prevScroll = container.scrollTop;
-    container.empty();
-    container.addClass("tc-sidebar");
-
     const file = this.app.workspace.getActiveFile();
     if (!file || file.extension !== "md") {
+      this.lastContentSignature = null;
+      recordSidebarRender();
+      container.empty();
+      container.addClass("tc-sidebar");
       container.createDiv({ text: "No active Markdown file.", cls: "tc-empty" });
       return;
     }
     const doc = await this.plugin.readDoc(file);
+    const signature = sidebarContentSignature(file.path, doc, this.showResolved, this.draft);
+    if (!opts?.force && !this.focusedId && signature === this.lastContentSignature) {
+      recordSidebarSkip();
+      return;
+    }
+    this.lastContentSignature = signature;
+    recordSidebarRender();
+
+    const prevScroll = container.scrollTop;
+    container.empty();
+    container.addClass("tc-sidebar");
+
     if (doc.error) {
       container.createDiv({ text: "tandem-comments block is invalid: " + doc.error, cls: "tc-error" });
       return;
