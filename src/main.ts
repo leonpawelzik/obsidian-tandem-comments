@@ -264,13 +264,23 @@ export default class CommentsPlugin extends Plugin {
     return new Date().toISOString();
   }
 
+  /**
+   * Prefer the live editor buffer when the file is open (L2/L3 reads stay off disk).
+   * Falls back to vault.read when no markdown editor holds the file.
+   */
+  async readFileText(file: TFile): Promise<string> {
+    const editor = this.editorForFile(file);
+    if (editor) return editor.getValue();
+    return this.app.vault.read(file);
+  }
+
   async readDoc(file: TFile): Promise<ParsedDoc> {
-    return parseDocument(await this.app.vault.read(file));
+    return parseDocument(await this.readFileText(file));
   }
 
   /** Alle Mutationen laufen hierdurch: read → parse → mutate → serialize → write. */
   async updateDoc(file: TFile, mutate: (doc: ParsedDoc) => void): Promise<boolean> {
-    const raw = await this.app.vault.read(file);
+    const raw = await this.readFileText(file);
     const doc = parseDocument(raw);
     if (doc.error) {
       new Notice("tandem-comments block is invalid — please fix the JSON: " + doc.error);

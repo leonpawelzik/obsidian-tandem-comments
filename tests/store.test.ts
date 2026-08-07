@@ -1,5 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { normalizeTrailingChanges, parseDocument, resolveAnchor, serializeDocument, SCHEMA_HINT_LINES } from "../src/store";
+import {
+  locateBlock,
+  normalizeTrailingChanges,
+  parseDocument,
+  proseEndOf,
+  resolveAnchor,
+  serializeDocument,
+  SCHEMA_HINT_LINES,
+} from "../src/store";
 import type { CommentMap } from "../src/types";
 
 const COMMENTS: CommentMap = {
@@ -14,6 +22,32 @@ function block(json: string, hint = true): string {
   const hintStr = hint ? SCHEMA_HINT_LINES.join("\n") + "\n" : "";
   return "```tandem-comments\n" + hintStr + json + "\n```\n";
 }
+
+describe("locateBlock / proseEndOf", () => {
+  it("returns null / full length when no fence exists", () => {
+    const raw = "# Titel\n\nWir senken den Preis.\n";
+    expect(locateBlock(raw)).toBeNull();
+    expect(proseEndOf(raw)).toBe(raw.length);
+  });
+
+  it("reports proseEnd without requiring valid JSON", () => {
+    const prose = "Hello world.";
+    const raw = prose + "\n```tandem-comments\n{ not-json\n```\n";
+    const loc = locateBlock(raw);
+    expect(loc).not.toBeNull();
+    expect(loc!.proseEnd).toBe(prose.length);
+    expect(proseEndOf(raw)).toBe(prose.length);
+    // Full parse still errors, but geometry stayed available for L0.
+    expect(parseDocument(raw).error).toBeTruthy();
+  });
+
+  it("matches parseDocument.prose.length for valid blocks", () => {
+    const prose = "Wir sollten den Preis aggressiv senken im Q3.";
+    const raw = prose + "\n" + block(JSON.stringify(COMMENTS, null, 2));
+    expect(proseEndOf(raw)).toBe(parseDocument(raw).prose.length);
+    expect(locateBlock(raw)?.body).toContain("a1f3");
+  });
+});
 
 describe("parseDocument", () => {
   it("returns whole file as prose when no block exists", () => {

@@ -30,13 +30,21 @@ export function parseBlockBody(body: string): CommentMap {
   return data as CommentMap;
 }
 
-interface BlockMatch {
+/** Geometry of the last tandem-comments fence — no JSON parse. */
+export interface BlockLocation {
+  /** Exclusive end offset of prose (start of `\n```tandem-comments` or 0). */
   proseEnd: number;
+  /** Raw fence body between open and close lines (may include // hints). */
   body: string;
+  /** Byte-exact content after the closing fence (e.g. footnote defs). */
   trailing: string;
 }
 
-function findBlock(raw: string): BlockMatch | null {
+/**
+ * Locates the last ```tandem-comments fence without parsing its JSON.
+ * Use this on the keystroke path when only prose length / block bounds matter.
+ */
+export function locateBlock(raw: string): BlockLocation | null {
   // Letzter Block der Datei; danach darf weiterer Inhalt folgen (z.B. Fußnoten-
   // Definitionen, die Obsidian ans Dateiende hängt — Issue #2).
   const idx = raw.lastIndexOf("\n" + FENCE_OPEN + "\n");
@@ -63,8 +71,14 @@ function findBlock(raw: string): BlockMatch | null {
   return { proseEnd, body: rest.slice(0, closeIdx), trailing };
 }
 
+/** Prose length only — fence scan, never JSON.parse. */
+export function proseEndOf(raw: string): number {
+  const blk = locateBlock(raw);
+  return blk ? blk.proseEnd : raw.length;
+}
+
 export function parseDocument(raw: string): ParsedDoc {
-  const blk = findBlock(raw);
+  const blk = locateBlock(raw);
   if (!blk) return { prose: raw, comments: {} };
   try {
     const comments = parseBlockBody(blk.body);
