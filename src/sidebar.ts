@@ -1,4 +1,4 @@
-import { ItemView, MarkdownRenderer, Notice, TFile, WorkspaceLeaf } from "obsidian";
+import { ItemView, MarkdownRenderer, Menu, Notice, setIcon, TFile, WorkspaceLeaf } from "obsidian";
 import { resolveAuthorColor, type AuthorColorOverrides } from "./author-color";
 import { formatComment, formatTs } from "./export";
 import type CommentsPlugin from "./main";
@@ -389,14 +389,31 @@ export class CommentSidebar extends ItemView {
         this.plugin.settings.authorColorOverrides
       );
       meta.createSpan({ text: formatTs(entry.ts), cls: "tc-ts" });
-      const entryActions = meta.createDiv({ cls: "tc-entry-actions" });
-      const entryDelete = entryActions.createEl("button", {
-        text: "Delete",
-        cls: "tc-entry-btn",
-        attr: { "aria-label": `Delete comment by ${entry.author}` },
+      const entryMenuTrigger = meta.createEl("button", {
+        cls: "tc-entry-menu-trigger clickable-icon",
+        attr: {
+          "aria-label": `More options for comment by ${entry.author}`,
+          "aria-haspopup": "menu",
+          "aria-expanded": "false",
+        },
       });
-      entryDelete.onclick = () =>
-        void this.plugin.updateDoc(file, (d) => removeThreadEntry(d.comments, r.id, entryIndex));
+      setIcon(entryMenuTrigger, "ellipsis");
+      entryMenuTrigger.onclick = () => {
+        const menu = new Menu();
+        menu.addItem((item) =>
+          item
+            .setTitle("Delete entry")
+            .setIcon("trash-2")
+            .setWarning(true)
+            .onClick(() =>
+              void this.plugin.updateDoc(file, (d) => removeThreadEntry(d.comments, r.id, entryIndex))
+            )
+        );
+        entryMenuTrigger.setAttr("aria-expanded", "true");
+        menu.onHide(() => entryMenuTrigger.setAttr("aria-expanded", "false"));
+        const rect = entryMenuTrigger.getBoundingClientRect();
+        menu.showAtPosition({ x: rect.right, y: rect.bottom, left: true }, entryMenuTrigger.ownerDocument);
+      };
 
       const textEl = row.createDiv({
         cls: "tc-text tc-text-editable",
