@@ -1,5 +1,6 @@
 import { Editor, MarkdownView, Notice, normalizePath, Plugin, TFile } from "obsidian";
 import { AUTHOR_OVERRIDE_KEY, detectOsUsername, FALLBACK_AUTHOR, resolveAuthorName } from "./author";
+import { normalizeAuthorColorOverrides } from "./author-color";
 import { buildEditorExtension } from "./editor-extension";
 import { buildExportNote, formatTs, renderExportFileName } from "./export";
 import { registerReadingView } from "./reading-view";
@@ -122,10 +123,14 @@ export default class CommentsPlugin extends Plugin {
   async loadSettings(): Promise<void> {
     const data = ((await this.loadData()) as (Partial<CommentsSettings> & { authorName?: string }) | null) ?? {};
     const hadLegacy = "authorName" in data;
+    const rawAuthorColors: unknown = data.authorColorOverrides;
+    const normalizedAuthorColors = normalizeAuthorColorOverrides(rawAuthorColors);
+    const hadLegacyAuthorColors = JSON.stringify(rawAuthorColors ?? {}) !== JSON.stringify(normalizedAuthorColors);
     this.migrateLegacyAuthorName(data);
     this.settings = Object.assign({}, DEFAULT_SETTINGS, data);
+    this.settings.authorColorOverrides = normalizedAuthorColors;
     // remove authorName from synced data if it was in there previously
-    if (hadLegacy) await this.saveData(this.settings);
+    if (hadLegacy || hadLegacyAuthorColors) await this.saveData(this.settings);
   }
 
   async saveSettings(): Promise<void> {
@@ -334,6 +339,12 @@ export default class CommentsPlugin extends Plugin {
     const view = leaf.view instanceof CommentSidebar ? leaf.view : null;
     if (view && focusId) view.focusComment(focusId);
     return view;
+  }
+
+  refreshAuthorColors(): void {
+    for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE_COMMENTS)) {
+      if (leaf.view instanceof CommentSidebar) leaf.view.refreshAuthorColors();
+    }
   }
 
   /** Scrollt im Markdown-Editor zur aufgelösten Anker-Stelle. */

@@ -8,7 +8,8 @@ Quote-anchored comments and edit suggestions for [Obsidian](https://obsidian.md)
 
 - **Comment on any selection** — via command palette, hotkey, or right-click menu
 - **Suggest edits** — propose a replacement for selected text, then accept or decline it from the sidebar
-- **Sidebar threads** — reply, resolve, reopen, delete, re-anchor orphaned comments
+- **Sidebar threads:** reply, edit, resolve, reopen, delete, and re-anchor orphaned comments
+- **Per-author colors:** distinguish participants automatically, with optional exact color overrides in settings
 - **Live highlights** in the editor; click a highlight to jump to its thread
 - **Live re-anchoring** — comments follow your text as you edit; if an anchor's text disappears, the comment becomes *orphaned* and can be re-attached to a new selection
 - **Resolve = remove** by default, keeping files clean (history mode available in settings)
@@ -115,6 +116,22 @@ For Claude Code, **Settings → Export Claude skill** writes a ready-made skill 
 ## Why a block at the end of the file?
 
 Inline comment markers break plain-text workflows: they show up in exports, confuse other tools, and make diffs noisy. Tandem Comments keeps annotations out of your prose entirely — the file remains a normal Markdown document that happens to carry its review thread with it.
+
+## Security
+
+Comment bodies are rendered with Obsidian's Markdown renderer and inherit its supported syntax, sanitization, and plugin post-processor behavior. Tandem Comments does not add a separate post-render HTML sanitizer.
+
+The real sanitizer cannot run under the test harness (Node/Vitest has no Obsidian runtime). The following smoke-test matrix was verified manually with Obsidian 1.12.4:
+
+| Comment input | Observed result |
+|---|---|
+| `**bold**`, `_italic_` | Renders bold / italic |
+| `[link](https://example.com)` | Renders a clickable, safe link |
+| Paragraph, blank line, paragraph | Two paragraphs with compact spacing |
+| `<script>alert(1)</script>` | Not executed; script neutralized |
+| `<img src=x onerror=alert(1)>` | No alert; `onerror` stripped |
+| `[x](javascript:alert(1))` | Click does nothing; scheme neutralized |
+| `<a href="vbscript:…">`, `data:` URL | Neutralized |
 
 ## License
 

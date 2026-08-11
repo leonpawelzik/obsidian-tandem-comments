@@ -1,4 +1,5 @@
-import { ItemView, Notice, TFile, WorkspaceLeaf } from "obsidian";
+import { ItemView, MarkdownRenderer, Notice, TFile, WorkspaceLeaf } from "obsidian";
+import { resolveAuthorColor, type AuthorColorOverrides } from "./author-color";
 import { formatComment, formatTs } from "./export";
 import type CommentsPlugin from "./main";
 import {
@@ -6,10 +7,10 @@ import {
   addReply,
   addSuggestion,
   declineSuggestion,
-  editEntry,
+  editThreadEntry,
   generateId,
   removeComment,
-  removeEntry,
+  removeThreadEntry,
   resolveAll,
   setStatus,
   type SuggestionFailureReason,
@@ -26,6 +27,14 @@ interface Draft {
 
 function truncate(s: string, n: number): string {
   return s.length <= n ? s : s.slice(0, n - 1) + "…";
+}
+
+/** Colors an author name span with accessible light and dark variants. */
+function paintAuthor(el: HTMLElement, author: string, overrides: AuthorColorOverrides): void {
+  el.style.setProperty("--tc-author-color-light", resolveAuthorColor(author, overrides, "light"));
+  el.style.setProperty("--tc-author-color-dark", resolveAuthorColor(author, overrides, "dark"));
+  el.dataset.tcAuthor = author;
+  el.addClass("tc-author-colored");
 }
 
 function suggestionFailureMessage(reason: SuggestionFailureReason): string {
@@ -103,9 +112,18 @@ export class CommentSidebar extends ItemView {
     void this.render();
   }
 
+  refreshAuthorColors(): void {
+    for (const el of Array.from(this.contentEl.querySelectorAll<HTMLElement>(".tc-author[data-tc-author]"))) {
+      const author = el.dataset.tcAuthor;
+      if (author != null) paintAuthor(el, author, this.plugin.settings.authorColorOverrides);
+    }
+  }
+
   /** Nicht neu rendern, während in einem Eingabefeld getippter Text verloren ginge. */
   private hasPendingInput(): boolean {
-    return Array.from(this.contentEl.querySelectorAll("textarea")).some((t) => t.value.length > 0);
+    return Array.from(this.contentEl.querySelectorAll("textarea")).some(
+      (t) => t.value.length > 0 || t.classList.contains("tc-edit-input")
+    );
   }
 
   async render(): Promise<void> {
@@ -317,7 +335,11 @@ export class CommentSidebar extends ItemView {
         });
       }
       const meta = card.createDiv({ cls: "tc-meta" });
-      meta.createSpan({ text: suggestion.author, cls: "tc-author" });
+      paintAuthor(
+        meta.createSpan({ text: suggestion.author, cls: "tc-author" }),
+        suggestion.author,
+        this.plugin.settings.authorColorOverrides
+      );
       meta.createSpan({ text: formatTs(suggestion.ts), cls: "tc-ts" });
       const change = card.createDiv({ cls: "tc-suggestion-change" });
       const original = change.createDiv({ text: r.comment.anchor.exact, cls: "tc-suggestion-original" });
@@ -358,22 +380,109 @@ export class CommentSidebar extends ItemView {
       }
     }
 
-    r.comment.thread.forEach((entry, index) => {
+    for (const [entryIndex, entry] of r.comment.thread.entries()) {
       const row = card.createDiv({ cls: "tc-entry" });
       const meta = row.createDiv({ cls: "tc-meta" });
-      meta.createSpan({ text: entry.author, cls: "tc-author" });
+      paintAuthor(
+        meta.createSpan({ text: entry.author, cls: "tc-author" }),
+        entry.author,
+        this.plugin.settings.authorColorOverrides
+      );
       meta.createSpan({ text: formatTs(entry.ts), cls: "tc-ts" });
-
       const entryActions = meta.createDiv({ cls: "tc-entry-actions" });
-      const editBtn = entryActions.createEl("button", { text: "Edit", cls: "tc-entry-btn" });
-      const entryDelBtn = entryActions.createEl("button", { text: "Delete", cls: "tc-entry-btn" });
+      const entryDelete = entryActions.createEl("button", {
+        text: "Delete",
+        cls: "tc-entry-btn",
+        attr: { "aria-label": `Delete comment by ${entry.author}` },
+      });
+      entryDelete.onclick = () =>
+        void this.plugin.updateDoc(file, (d) => removeThreadEntry(d.comments, r.id, entryIndex));
 
-      const textEl = row.createDiv({ text: entry.text, cls: "tc-text" });
+      const textEl = row.createDiv({
+        cls: "tc-text tc-text-editable",
+        attr: {
+          tabindex: "0",
+          title: "Double-click to edit",
+          "aria-label": `Comment by ${entry.author}. Double-click or press Enter to edit.`,
+        },
+      });
+      // Use Obsidian's renderer and inherit its Markdown, sanitization, and
+      // registered post-processor behavior.
+      void MarkdownRenderer.render(this.app, entry.text, textEl, file.path, this);
+      const beginEdit = (): void => {
+        const expected = { ...entry };
+        const input = row.createEl("textarea", {
+          cls: "tc-input tc-edit-input",
+          attr: { rows: "3", "aria-label": `Edit comment by ${entry.author}` },
+        });
+        input.value = entry.text;
+        textEl.replaceWith(input);
+        const editActions = row.createDiv({ cls: "tc-actions tc-edit-actions" });
+        const save = editActions.createEl("button", { text: "Save", cls: "mod-cta" });
+        const cancel = editActions.createEl("button", { text: "Cancel" });
 
-      editBtn.onclick = () => this.startEntryEdit(row, textEl, file, r.id, index, entry.text);
-      entryDelBtn.onclick = () =>
-        void this.plugin.updateDoc(file, (d) => removeEntry(d.comments, r.id, index));
-    });
+        const submit = (): void => {
+          if (save.disabled) return;
+          const text = input.value.trim();
+          if (!text) {
+            new Notice("Comment cannot be empty.");
+            input.focus();
+            return;
+          }
+          if (text === expected.text) {
+            void this.render();
+            return;
+          }
+          save.disabled = true;
+          cancel.disabled = true;
+          let failure: "missing" | "conflict" | null = null;
+          void this.plugin
+            .updateDoc(file, (d) => {
+              const result = editThreadEntry(d.comments, r.id, entryIndex, expected, text);
+              if (!result.ok) failure = result.reason;
+            })
+            .then((ok) => {
+              if (!ok) {
+                save.disabled = false;
+                cancel.disabled = false;
+                return;
+              }
+              if (failure === "conflict") {
+                new Notice("This comment changed while you were editing it. Your edit was not saved.");
+              } else if (failure === "missing") {
+                new Notice("This comment no longer exists. Your edit was not saved.");
+              }
+              void this.render();
+            });
+        };
+
+        save.onclick = submit;
+        cancel.onclick = () => void this.render();
+        input.onkeydown = (e) => {
+          if (e.key === "Escape") {
+            e.preventDefault();
+            void this.render();
+          } else if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+            e.preventDefault();
+            submit();
+          }
+        };
+        input.focus();
+        input.setSelectionRange(input.value.length, input.value.length);
+      };
+      textEl.ondblclick = (e) => {
+        if (e.target instanceof Element && e.target.closest("a")) return;
+        e.preventDefault();
+        beginEdit();
+      };
+      textEl.onkeydown = (e) => {
+        if (e.target !== textEl) return;
+        if (e.key === "Enter" || e.key === "F2") {
+          e.preventDefault();
+          beginEdit();
+        }
+      };
+    }
 
     const actions = card.createDiv({ cls: "tc-actions" });
     if (r.comment.status === "open" && r.comment.suggestion && !r.comment.suggestion.result) {
@@ -422,10 +531,12 @@ export class CommentSidebar extends ItemView {
       void navigator.clipboard
         .writeText(formatComment(r, { includeQuote: this.plugin.settings.copyIncludeQuote, formatTs }))
         .then(() => new Notice("Thread copied."));
-    // Suggestion cards may carry an empty thread, so no root entry exists to host a
-    // per-entry Delete. Keep the card-level Delete only for those.
-    if (r.comment.thread.length === 0) {
-      const delBtn = actions.createEl("button", { text: "Delete" });
+    // A suggestion's thread entries are its explanation and replies, so it still
+    // needs a card-level action that discards the suggestion itself.
+    if (r.comment.suggestion || r.comment.thread.length === 0) {
+      const delBtn = actions.createEl("button", {
+        text: r.comment.suggestion ? "Delete suggestion" : "Delete",
+      });
       delBtn.onclick = () => void this.plugin.updateDoc(file, (d) => removeComment(d.comments, r.id));
     }
 
@@ -446,36 +557,6 @@ export class CommentSidebar extends ItemView {
         }
       };
     }
-  }
-
-  /** Ersetzt den Eintragstext durch ein Textarea; Enter speichert, Esc bricht ab. */
-  private startEntryEdit(
-    row: HTMLElement,
-    textEl: HTMLElement,
-    file: TFile,
-    id: string,
-    index: number,
-    current: string
-  ): void {
-    textEl.hide();
-    const input = row.createEl("textarea", {
-      cls: "tc-input",
-      attr: { placeholder: "Edit… (Enter = save, Esc = cancel)", rows: "2" },
-    });
-    input.value = current;
-    window.setTimeout(() => input.focus(), 0);
-    input.onkeydown = (e) => {
-      if (e.key === "Escape") {
-        e.preventDefault();
-        void this.render();
-      } else if (e.key === "Enter" && !e.shiftKey) {
-        e.preventDefault();
-        const text = input.value.trim();
-        if (!text) return;
-        input.value = "";
-        void this.plugin.updateDoc(file, (d) => editEntry(d.comments, id, index, text));
-      }
-    };
   }
 
   private reanchorFromSelection(file: TFile, id: string): void {

@@ -1,4 +1,10 @@
 import { App, Notice, PluginSettingTab, Setting } from "obsidian";
+import {
+  authorHue,
+  hasAuthorColorOverride,
+  renameAuthorColorOverride,
+  type AuthorColorOverrides,
+} from "./author-color";
 import type CommentsPlugin from "./main";
 import { exportSkill } from "./skill-export";
 
@@ -10,6 +16,7 @@ export interface CommentsSettings {
   copyIncludeQuote: boolean;
   exportNameTemplate: string;
   exportScope: "all" | "open";
+  authorColorOverrides: AuthorColorOverrides;
 }
 
 export const DEFAULT_SETTINGS: CommentsSettings = {
@@ -20,9 +27,12 @@ export const DEFAULT_SETTINGS: CommentsSettings = {
   copyIncludeQuote: true,
   exportNameTemplate: "{{filename}} – Comments",
   exportScope: "all",
+  authorColorOverrides: {},
 };
 
 export class CommentsSettingTab extends PluginSettingTab {
+  private authorColorsExpanded = false;
+
   constructor(app: App, private plugin: CommentsPlugin) {
     super(app, plugin);
   }
@@ -30,7 +40,6 @@ export class CommentsSettingTab extends PluginSettingTab {
   display(): void {
     const { containerEl } = this;
     containerEl.empty();
-
     const detected = this.plugin.detectedAuthor();
     new Setting(containerEl)
       .setName("Display name")
@@ -54,6 +63,163 @@ export class CommentsSettingTab extends PluginSettingTab {
           await this.plugin.saveSettings();
         })
       );
+
+    const authorColors = containerEl.createEl("details", { cls: "tc-author-colors-collapse" });
+    authorColors.open = this.authorColorsExpanded;
+    authorColors.ontoggle = () => {
+      this.authorColorsExpanded = authorColors.open;
+    };
+    const authorColorNames = Object.keys(this.plugin.settings.authorColorOverrides).sort((a, b) =>
+      a.localeCompare(b)
+    );
+    const summary = authorColors.createEl("summary", { cls: "tc-author-colors-summary" });
+    summary.createSpan({ text: "Author Colors" });
+    const authorColorsContent = authorColors.createDiv({ cls: "tc-author-colors-content" });
+    authorColorsContent.createDiv({
+      text:
+        "Unknown authors receive an automatic accessible color. Manual overrides use the exact selected color " +
+        "in both light and dark themes.",
+      cls: "tc-author-colors-description",
+    });
+
+    let newAuthor = "";
+    let newColor = "#2680d9";
+    let authorInput: HTMLInputElement | null = null;
+    const addAuthorRow = new Setting(authorColorsContent)
+      .setName("Add author override")
+      .setDesc("Enter the exact author name used in comment threads.")
+      .addText((text) => {
+        authorInput = text.inputEl;
+        text
+          .setPlaceholder("Author name…")
+          .onChange((value) => {
+            newAuthor = value;
+            if (value.trim()) validationEl.empty();
+          });
+        text.inputEl.name = "tandem-author-color-name";
+        text.inputEl.autocomplete = "off";
+        text.inputEl.spellcheck = false;
+        text.inputEl.setAttr("aria-label", "Author name for color override");
+      })
+      .addColorPicker((picker) => {
+        picker.setValue(newColor).onChange((value) => {
+          newColor = value;
+        });
+      })
+      .addButton((button) =>
+        button.setButtonText("Add Override").setCta().onClick(async () => {
+          const author = newAuthor.trim();
+          if (!author) {
+            validationEl.setText("Enter an author name before adding an override.");
+            authorInput?.focus();
+            return;
+          }
+          if (hasAuthorColorOverride(this.plugin.settings.authorColorOverrides, author)) {
+            validationEl.setText(`An override for ${author} already exists. Edit it below.`);
+            authorInput?.focus();
+            return;
+          }
+          this.plugin.settings.authorColorOverrides = {
+            ...this.plugin.settings.authorColorOverrides,
+            [author]: newColor,
+          };
+          await this.plugin.saveSettings();
+          this.plugin.refreshAuthorColors();
+          this.display();
+        })
+      );
+    const validationEl = addAuthorRow.descEl.createDiv({
+      cls: "tc-setting-error",
+      attr: { "aria-live": "polite" },
+    });
+    addAuthorRow.controlEl
+      .querySelector<HTMLInputElement>('input[type="color"]')
+      ?.setAttr("aria-label", "Color hue for new author override");
+
+    if (authorColorNames.length > 0) {
+      authorColorsContent.createDiv({ text: "Existing overrides", cls: "tc-author-colors-list-title" });
+    }
+    for (const author of authorColorNames) {
+      const row = new Setting(authorColorsContent)
+        .setClass("tc-author-color-row")
+        .setDesc(`Automatic hue: ${authorHue(author)}°.`)
+        .addColorPicker((picker) =>
+          picker
+            .setValue(String(this.plugin.settings.authorColorOverrides[author]))
+            .onChange(async (value) => {
+              this.plugin.settings.authorColorOverrides = {
+                ...this.plugin.settings.authorColorOverrides,
+                [author]: value,
+              };
+              await this.plugin.saveSettings();
+              this.plugin.refreshAuthorColors();
+            })
+        )
+        .addButton((button) =>
+          button
+            .setButtonText("Reset")
+            .setTooltip(`Reset ${author} to its automatic color`)
+            .onClick(async () => {
+              const overrides = { ...this.plugin.settings.authorColorOverrides };
+              delete overrides[author];
+              this.plugin.settings.authorColorOverrides = overrides;
+              await this.plugin.saveSettings();
+              this.plugin.refreshAuthorColors();
+              this.display();
+            })
+        );
+      const nameInput = row.nameEl.createEl("input", {
+        cls: "tc-author-color-name",
+        attr: {
+          type: "text",
+          name: `tandem-author-color-${author}`,
+          autocomplete: "off",
+          spellcheck: "false",
+          "aria-label": `Author name for ${author} color override`,
+        },
+      });
+      nameInput.value = author;
+      const renameError = row.descEl.createDiv({
+        cls: "tc-setting-error",
+        attr: { "aria-live": "polite" },
+      });
+      nameInput.oninput = () => renameError.empty();
+      nameInput.onchange = () => {
+        const result = renameAuthorColorOverride(
+          this.plugin.settings.authorColorOverrides,
+          author,
+          nameInput.value
+        );
+        if (!result.ok) {
+          renameError.setText(
+            result.reason === "empty"
+              ? "Enter an author name."
+              : `An override for ${nameInput.value.trim()} already exists.`
+          );
+          nameInput.focus();
+          return;
+        }
+        this.plugin.settings.authorColorOverrides = result.overrides;
+        void this.plugin.saveSettings().then(() => {
+          this.plugin.refreshAuthorColors();
+          this.display();
+        });
+      };
+      nameInput.onkeydown = (event) => {
+        if (event.key === "Enter") {
+          event.preventDefault();
+          nameInput.blur();
+        } else if (event.key === "Escape") {
+          event.preventDefault();
+          nameInput.value = author;
+          renameError.empty();
+          nameInput.blur();
+        }
+      };
+      row.controlEl
+        .querySelector<HTMLInputElement>('input[type="color"]')
+        ?.setAttr("aria-label", `Color hue for ${author}`);
+    }
 
     new Setting(containerEl)
       .setName("Show resolved by default")

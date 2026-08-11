@@ -34,10 +34,6 @@
   border-color: var(--interactive-accent);
 }
 
-.tc-card.tc-resolved {
-  opacity: 0.65;
-}
-
 .tc-card.tc-orphan {
   border-style: dashed;
 }
@@ -75,8 +71,16 @@
 }
 
 .tc-author {
-  font-weight: 600;
+  font-weight: 400;
   color: var(--text-normal);
+}
+
+.tc-author-colored {
+  color: var(--tc-author-color-light);
+}
+
+.theme-dark .tc-author-colored {
+  color: var(--tc-author-color-dark);
 }
 
 .tc-entry-actions {
@@ -84,12 +88,14 @@
   display: flex;
   gap: 4px;
   opacity: 0;
+  pointer-events: none;
   transition: opacity 0.1s ease-in;
 }
 
 .tc-card:hover .tc-entry-actions,
 .tc-entry:focus-within .tc-entry-actions {
   opacity: 1;
+  pointer-events: auto;
 }
 
 .tc-entry-btn {
@@ -106,8 +112,41 @@
   color: var(--text-normal);
 }
 
+@media (hover: none) {
+  .tc-entry-actions {
+    opacity: 1;
+    pointer-events: auto;
+  }
+}
+
 .tc-text {
-  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.tc-text p {
+  margin: 0.7em 0;
+}
+
+.tc-text > :first-child {
+  margin-top: 0;
+}
+
+.tc-text > :last-child {
+  margin-bottom: 0;
+}
+
+.tc-text-editable {
+  cursor: text;
+  border-radius: 4px;
+}
+
+.tc-text-editable:hover {
+  background: var(--background-modifier-hover);
+}
+
+.tc-text-editable:focus-visible {
+  outline: 2px solid var(--interactive-accent);
+  outline-offset: 2px;
 }
 
 .tc-field-label {
@@ -201,6 +240,14 @@
   resize: vertical;
 }
 
+.tc-edit-input {
+  min-height: 64px;
+}
+
+.tc-edit-actions {
+  justify-content: flex-end;
+}
+
 .tc-section {
   margin: 14px 0 6px;
   font-weight: 600;
@@ -218,6 +265,67 @@
 
 .tc-error {
   color: var(--text-error);
+}
+
+.tc-setting-error {
+  color: var(--text-error);
+  margin-top: 4px;
+}
+
+.tc-author-colors-collapse {
+  margin: 14px 0;
+  border-top: 1px solid var(--background-modifier-border);
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.tc-author-colors-summary {
+  padding: 12px 0;
+  cursor: pointer;
+  touch-action: manipulation;
+  font-weight: 400;
+}
+
+.tc-author-colors-summary:hover {
+  color: var(--text-accent);
+}
+
+.tc-author-colors-summary:focus-visible {
+  outline: 2px solid var(--interactive-accent);
+  outline-offset: 2px;
+}
+
+.tc-author-colors-content {
+  padding: 0 0 8px 20px;
+}
+
+.tc-author-colors-description {
+  margin-bottom: 6px;
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+}
+
+.tc-author-colors-list-title {
+  margin-top: 12px;
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.tc-author-color-row .setting-item-info {
+  min-width: 0;
+}
+
+.tc-author-color-name {
+  width: min(220px, 100%);
+  font-weight: 500;
+}
+
+@media (max-width: 500px) {
+  .tc-author-colors-content {
+    padding-left: 0;
+  }
 }
 
 .tc-pill {

@@ -3,10 +3,10 @@ import {
   addComment,
   addReply,
   addSuggestion,
-  editEntry,
+  editThreadEntry,
   generateId,
   removeComment,
-  removeEntry,
+  removeThreadEntry,
   resolveAll,
   setStatus,
 } from "../src/store";
@@ -57,6 +57,30 @@ describe("mutations", () => {
     expect(() => addReply(sample(), "nope", "X", "ts", "t")).toThrow();
   });
 
+  it("edits one thread entry without changing its metadata", () => {
+    const c = sample();
+    const original = { ...c.a1f3.thread[0] };
+
+    expect(editThreadEntry(c, "a1f3", 0, original, "Corrected text")).toEqual({ ok: true });
+    expect(c.a1f3.thread[0]).toEqual({
+      author: "Leon",
+      ts: "2026-06-10T00:00:00Z",
+      text: "Corrected text",
+    });
+  });
+
+  it("does not overwrite a thread entry that changed after editing began", () => {
+    const c = sample();
+    const original = { ...c.a1f3.thread[0] };
+    c.a1f3.thread[0].text = "Changed elsewhere";
+
+    expect(editThreadEntry(c, "a1f3", 0, original, "My edit")).toEqual({
+      ok: false,
+      reason: "conflict",
+    });
+    expect(c.a1f3.thread[0].text).toBe("Changed elsewhere");
+  });
+
   it("setStatus flips status", () => {
     const c = sample();
     setStatus(c, "a1f3", "resolved");
@@ -69,47 +93,28 @@ describe("mutations", () => {
     expect(c).toEqual({});
   });
 
-  it("editEntry changes only the text and preserves author and ts", () => {
+  it("removeThreadEntry on a reply splices just that entry", () => {
     const c = threaded();
-    editEntry(c, "a1f3", 1, "Neuer Text");
-    expect(c.a1f3.thread[1]).toEqual({
-      author: "Claude",
-      ts: "2026-06-10T01:00:00Z",
-      text: "Neuer Text",
-    });
-    expect(c.a1f3.thread[0].text).toBe("Hi");
-  });
-
-  it("editEntry throws for unknown id", () => {
-    expect(() => editEntry(sample(), "nope", 0, "x")).toThrow();
-  });
-
-  it("editEntry throws for out-of-range index", () => {
-    expect(() => editEntry(sample(), "a1f3", 5, "x")).toThrow();
-  });
-
-  it("removeEntry on a reply splices just that entry", () => {
-    const c = threaded();
-    removeEntry(c, "a1f3", 1);
+    removeThreadEntry(c, "a1f3", 1);
     expect(c.a1f3.thread).toHaveLength(1);
     expect(c.a1f3.thread[0].author).toBe("Leon");
   });
 
-  it("removeEntry on the root entry deletes the whole comment", () => {
+  it("removeThreadEntry on the root entry deletes the whole comment", () => {
     const c = threaded();
-    removeEntry(c, "a1f3", 0);
+    removeThreadEntry(c, "a1f3", 0);
     expect(c).toEqual({});
   });
 
-  it("removeEntry throws for unknown id", () => {
-    expect(() => removeEntry(sample(), "nope", 0)).toThrow();
+  it("removeThreadEntry throws for unknown id", () => {
+    expect(() => removeThreadEntry(sample(), "nope", 0)).toThrow();
   });
 
-  it("removeEntry throws for out-of-range index", () => {
-    expect(() => removeEntry(sample(), "a1f3", 5)).toThrow();
+  it("removeThreadEntry throws for out-of-range index", () => {
+    expect(() => removeThreadEntry(sample(), "a1f3", 5)).toThrow();
   });
 
-  it("removeEntry on a suggestion's explanation keeps the suggestion", () => {
+  it("removeThreadEntry on a suggestion's explanation keeps the suggestion", () => {
     const c: CommentMap = {};
     addSuggestion(
       c,
@@ -120,10 +125,13 @@ describe("mutations", () => {
       "replacement",
       "why this change"
     );
-    removeEntry(c, "s1", 0);
+    addReply(c, "s1", "Leon", "2026-06-10T01:00:00Z", "Follow-up");
+    removeThreadEntry(c, "s1", 0);
     expect(c.s1).toBeDefined();
     expect(c.s1.suggestion?.replacement).toBe("replacement");
-    expect(c.s1.thread).toHaveLength(0);
+    expect(c.s1.thread).toEqual([
+      { author: "Leon", ts: "2026-06-10T01:00:00Z", text: "Follow-up" },
+    ]);
   });
 
   it("generateId returns 4-char hex ids not colliding with existing", () => {

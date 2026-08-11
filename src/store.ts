@@ -8,6 +8,7 @@ import type {
   ParsedDoc,
   ResolvedComment,
   SuggestionResult,
+  ThreadEntry,
 } from "./types";
 
 export const SCHEMA_HINT_LINES = [
@@ -197,34 +198,41 @@ export function addReply(comments: CommentMap, id: string, author: string, ts: s
   c.thread.push({ author, ts, text });
 }
 
+export function editThreadEntry(
+  comments: CommentMap,
+  id: string,
+  index: number,
+  expected: ThreadEntry,
+  text: string
+): { ok: true } | { ok: false; reason: "missing" | "conflict" } {
+  const entry = comments[id]?.thread[index];
+  if (!entry) return { ok: false, reason: "missing" };
+  if (entry.author !== expected.author || entry.ts !== expected.ts || entry.text !== expected.text) {
+    return { ok: false, reason: "conflict" };
+  }
+  entry.text = text;
+  return { ok: true };
+}
+
 export function setStatus(comments: CommentMap, id: string, status: CommentStatus): void {
   const c = comments[id];
   if (!c) throw new Error(`tandem-comments: unknown comment id "${id}"`);
   c.status = status;
 }
 
-export function editEntry(comments: CommentMap, id: string, index: number, text: string): void {
-  const c = comments[id];
-  if (!c) throw new Error(`tandem-comments: unknown comment id "${id}"`);
-  const entry = c.thread[index];
-  if (!entry) throw new Error(`tandem-comments: thread entry ${index} out of range for comment "${id}"`);
-  entry.text = text;
-}
-
-export function removeEntry(comments: CommentMap, id: string, index: number): void {
-  const c = comments[id];
-  if (!c) throw new Error(`tandem-comments: unknown comment id "${id}"`);
-  if (!c.thread[index]) {
+export function removeThreadEntry(comments: CommentMap, id: string, index: number): void {
+  const comment = comments[id];
+  if (!comment) throw new Error(`tandem-comments: unknown comment id "${id}"`);
+  if (!comment.thread[index]) {
     throw new Error(`tandem-comments: thread entry ${index} out of range for comment "${id}"`);
   }
-  // Deleting a plain comment's root entry deletes the thread it heads. A suggestion's
-  // thread[0] is only its optional explanation, so removing it must leave the
-  // suggestion itself intact — use the card-level Delete to discard a suggestion.
-  if (index === 0 && !c.suggestion) {
+  // A plain comment's first entry is its root, so deleting it removes the whole
+  // thread. A suggestion's first entry is only its optional explanation.
+  if (index === 0 && !comment.suggestion) {
     delete comments[id];
     return;
   }
-  c.thread.splice(index, 1);
+  comment.thread.splice(index, 1);
 }
 
 export function removeComment(comments: CommentMap, id: string): void {
