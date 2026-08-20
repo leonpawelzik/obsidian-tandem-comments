@@ -4,11 +4,18 @@ import {
   normalizeTrailingChanges,
   parseDocument,
   proseEndOf,
+  proseEndOfText,
+  fenceStartsAt,
   resolveAnchor,
   serializeDocument,
   SCHEMA_HINT_LINES,
+  type TextSlice,
 } from "../src/store";
 import type { CommentMap } from "../src/types";
+
+function asText(raw: string): TextSlice {
+  return { length: raw.length, sliceString: (from, to) => raw.slice(from, to) };
+}
 
 const COMMENTS: CommentMap = {
   a1f3: {
@@ -46,6 +53,14 @@ describe("locateBlock / proseEndOf", () => {
     const raw = prose + "\n" + block(JSON.stringify(COMMENTS, null, 2));
     expect(proseEndOf(raw)).toBe(parseDocument(raw).prose.length);
     expect(locateBlock(raw)?.body).toContain("a1f3");
+  });
+
+  it("proseEndOfText agrees with proseEndOf without flattening beyond the fence", () => {
+    const prose = "x".repeat(9000) + " quoted ";
+    const raw = prose + "\n" + block(JSON.stringify(COMMENTS, null, 2));
+    expect(proseEndOfText(asText(raw))).toBe(proseEndOf(raw));
+    expect(fenceStartsAt(asText(raw), prose.length)).toBe(true);
+    expect(proseEndOfText(asText("no fence here"))).toBe("no fence here".length);
   });
 });
 

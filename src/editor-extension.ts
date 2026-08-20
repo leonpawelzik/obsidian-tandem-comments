@@ -1,4 +1,4 @@
-import { Annotation, RangeSetBuilder, Transaction } from "@codemirror/state";
+import { Annotation, RangeSetBuilder, Transaction, type ChangeSet } from "@codemirror/state";
 import { Decoration, DecorationSet, EditorView, ViewPlugin, ViewUpdate } from "@codemirror/view";
 import type CommentsPlugin from "./main";
 import {
@@ -18,12 +18,16 @@ import {
   type TrackedAnchor,
 } from "./reanchor";
 import {
+  FENCE_OPEN,
+  fenceStartsAt,
   makeAnchor,
   normalizeTrailingChanges,
   parseDocument,
   proseEndOf,
+  proseEndOfText,
   resolveAnchor,
   serializeDocument,
+  type TextSlice,
 } from "./store";
 import { applyTableHighlights, clearTableHighlights, findTables, rangesTouchTable } from "./table-highlight";
 
@@ -81,6 +85,28 @@ export function isSuggestionAcceptanceHistoryUpdate(u: ViewUpdate, oldText: stri
   return false;
 }
 
+function insertedContains(changes: ChangeSet, needle: string): boolean {
+  let hit = false;
+  changes.iterChanges((_fromA, _toA, _fromB, _toB, inserted) => {
+    if (!hit && inserted.toString().includes(needle)) hit = true;
+  });
+  return hit;
+}
+
+/** Cheap window around each change — used only when this note has no tandem fence yet. */
+function changeWindowLooksLikeFence(doc: TextSlice, changes: ChangeSet): boolean {
+  const pad = FENCE_OPEN.length + 8;
+  let found = false;
+  changes.iterChangedRanges((_fromA, _toA, fromB, toB) => {
+    if (found) return;
+    const from = Math.max(0, fromB - pad);
+    const to = Math.min(doc.length, toB + pad);
+    const slice = doc.sliceString(from, to);
+    if (slice.includes(FENCE_OPEN) || slice.includes("```")) found = true;
+  });
+  return found;
+}
+
 function editorAnchorTrackerClass(plugin: EditorExtensionHost) {
   return (
     class {
@@ -88,6 +114,9 @@ function editorAnchorTrackerClass(plugin: EditorExtensionHost) {
       anchors: TrackedAnchor[] = [];
       dirty = false;
       persistTimer: number | null = null;
+      /** Exclusive prose end / fence start. Mapped through typing; verified, not re-scanned. */
+      proseEnd = 0;
+      hasBlock = false;
       /**
        * Sticky table presence for the current doc generation.
        * null = unknown (rescan on next table work); false = skip DOM path;
@@ -106,19 +135,42 @@ function editorAnchorTrackerClass(plugin: EditorExtensionHost) {
         if (this.persistTimer !== null) window.clearTimeout(this.persistTimer);
       }
 
+      private captureFence(doc: TextSlice, knownProseEnd?: number): void {
+        this.proseEnd = knownProseEnd ?? proseEndOfText(doc);
+        this.hasBlock = fenceStartsAt(doc, this.proseEnd);
+      }
+
+      /** Map the cached fence through this transaction; rescan only when the mapping is stale. */
+      private mapProseEnd(u: ViewUpdate): number {
+        const doc = u.state.doc;
+        if (!this.hasBlock) {
+          if (!changeWindowLooksLikeFence(doc, u.changes)) return doc.length;
+          return proseEndOfText(doc);
+        }
+        const mapped = u.changes.mapPos(this.proseEnd, 1);
+        if (fenceStartsAt(doc, mapped)) return mapped;
+        return proseEndOfText(doc);
+      }
+
       syncFromDoc(text: string): void {
         recordParse();
         const doc = parseDocument(text);
         this.anchors = [];
         this.dirty = false;
-        this.hasTables = null;
-        if (doc.error) return;
+        if (doc.error) {
+          this.hasTables = null;
+          this.captureFence(this.view.state.doc);
+          return;
+        }
+        this.proseEnd = doc.prose.length;
+        this.hasBlock = fenceStartsAt(this.view.state.doc, this.proseEnd);
         for (const [id, c] of Object.entries(doc.comments)) {
           if (c.status === "resolved") continue;
           const r = resolveAnchor(doc.prose, c.anchor);
           if (r.kind === "resolved") this.anchors.push({ id, from: r.start, to: r.end });
         }
         this.anchors.sort((a, b) => a.from - b.from);
+        this.hasTables = this.anchors.length === 0 ? false : findTables(text, doc.prose.length).length > 0;
       }
 
       /** Table DOM work only when anchors exist and we have not proven absence of tables. */
@@ -152,19 +204,20 @@ function editorAnchorTrackerClass(plugin: EditorExtensionHost) {
         }
 
         const t0 = performance.now();
-        this.hasTables = null;
         this.schedulePersist();
 
-        // L0: materialize doc strings once per transaction; prose lengths without JSON.
-        const text = u.state.doc.toString();
-        const oldText = u.startState.doc.toString();
-        const oldProseLen = proseEndOf(oldText);
-        const newProseLen = proseEndOf(text);
+        const oldProseLen = this.proseEnd;
+        const newProseLen = this.mapProseEnd(u);
+        this.proseEnd = newProseLen;
+        this.hasBlock = fenceStartsAt(u.state.doc, newProseLen);
 
         const isSelf = u.transactions.some((tr) => tr.annotation(selfEdit));
         const fullReplace = isFullReplace(u.changes);
         const touchesBlock = changesTouchCommentBlock(u.changes, oldProseLen, newProseLen);
-        const acceptanceHistory = isSuggestionAcceptanceHistoryUpdate(u, oldText, text);
+        const isHistory = u.transactions.some((tr) => tr.isUserEvent("undo") || tr.isUserEvent("redo"));
+        const acceptanceHistory = isHistory
+          ? isSuggestionAcceptanceHistoryUpdate(u, u.startState.doc.toString(), u.state.doc.toString())
+          : false;
         const preservePending = shouldPreservePendingAnchors(
           u.changes,
           oldProseLen,
@@ -179,6 +232,7 @@ function editorAnchorTrackerClass(plugin: EditorExtensionHost) {
         let rebuildDeco = true;
 
         if (isSelf || fullReplace || touchesBlock) {
+          const text = u.state.doc.toString();
           this.syncFromDoc(text);
           if (pending.length > 0) {
             recordParse();
@@ -202,12 +256,14 @@ function editorAnchorTrackerClass(plugin: EditorExtensionHost) {
             }
           }
         } else {
+          if (this.hasTables === false && insertedContains(u.changes, "|")) this.hasTables = null;
           const ranges: { from: number; to: number }[] = [];
           u.changes.iterChangedRanges((_fromA, _toA, fromB, toB) => {
             ranges.push({ from: fromB, to: toB });
           });
-          const touchTable =
-            this.hasTables !== false && rangesTouchTable(text, newProseLen, ranges);
+          const needTableCheck = this.hasTables !== false && this.anchors.length > 0;
+          const text = needTableCheck ? u.state.doc.toString() : "";
+          const touchTable = needTableCheck && rangesTouchTable(text, newProseLen, ranges);
           if (touchTable) {
             this.hasTables = true;
             const mapped = mapAnchors(this.anchors, u.changes);

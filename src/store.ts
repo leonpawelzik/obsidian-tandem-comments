@@ -16,8 +16,17 @@ export const SCHEMA_HINT_LINES = [
   '// Anchor = quote from the prose. To locate: search for "exact", disambiguate via prefix/suffix.',
 ];
 
-const FENCE_OPEN = "```tandem-comments";
+export const FENCE_OPEN = "```tandem-comments";
+const FENCE_AT_START = FENCE_OPEN + "\n";
+const FENCE_NEEDLE = "\n" + FENCE_OPEN + "\n";
+const FENCE_SCAN_CHUNK = 4096;
 const CONTEXT_LEN = 20;
+
+/** Minimal CodeMirror Text surface — locate the fence without flattening the doc. */
+export interface TextSlice {
+  readonly length: number;
+  sliceString(from: number, to?: number): string;
+}
 
 export function parseBlockBody(body: string): CommentMap {
   const lines = body.split("\n");
@@ -75,6 +84,55 @@ export function locateBlock(raw: string): BlockLocation | null {
 export function proseEndOf(raw: string): number {
   const blk = locateBlock(raw);
   return blk ? blk.proseEnd : raw.length;
+}
+
+/** True when `pos` is the exclusive prose end of a tandem-comments fence. */
+export function fenceStartsAt(doc: TextSlice, pos: number): boolean {
+  if (pos === 0) {
+    return doc.length >= FENCE_AT_START.length && doc.sliceString(0, FENCE_AT_START.length) === FENCE_AT_START;
+  }
+  const end = pos + FENCE_NEEDLE.length;
+  return end <= doc.length && doc.sliceString(pos, end) === FENCE_NEEDLE;
+}
+
+function lastOpenFence(doc: TextSlice): { proseEnd: number; bodyStart: number } | null {
+  const n = doc.length;
+  const overlap = FENCE_NEEDLE.length - 1;
+  let end = n;
+  while (end > 0) {
+    const start = Math.max(0, end - FENCE_SCAN_CHUNK);
+    const slice = doc.sliceString(start, end);
+    const idx = slice.lastIndexOf(FENCE_NEEDLE);
+    if (idx >= 0) {
+      const proseEnd = start + idx;
+      return { proseEnd, bodyStart: proseEnd + FENCE_NEEDLE.length };
+    }
+    if (start === 0) break;
+    end = start + overlap;
+  }
+  if (n >= FENCE_AT_START.length && doc.sliceString(0, FENCE_AT_START.length) === FENCE_AT_START) {
+    return { proseEnd: 0, bodyStart: FENCE_AT_START.length };
+  }
+  return null;
+}
+
+function closingFenceIndex(rest: string): number {
+  let closeIdx = rest.indexOf("\n```");
+  while (closeIdx >= 0 && closeIdx + 4 < rest.length && rest[closeIdx + 4] !== "\n") {
+    closeIdx = rest.indexOf("\n```", closeIdx + 1);
+  }
+  return closeIdx;
+}
+
+/**
+ * Prose end on a CodeMirror Text (or any sliceable buffer). Reads a suffix
+ * around the fence instead of materializing the whole note.
+ */
+export function proseEndOfText(doc: TextSlice): number {
+  const open = lastOpenFence(doc);
+  if (!open) return doc.length;
+  const rest = doc.sliceString(open.bodyStart);
+  return closingFenceIndex(rest) >= 0 ? open.proseEnd : doc.length;
 }
 
 export function parseDocument(raw: string): ParsedDoc {
