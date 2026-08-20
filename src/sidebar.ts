@@ -4,8 +4,9 @@ import { confirmAction } from "./confirm-action";
 import { formatComment, formatTs } from "./export";
 import type CommentsPlugin from "./main";
 import { recordSidebarRender, recordSidebarSkip } from "./perf";
+import { reconcileKeyedChildren, type KeyedSignature } from "./sidebar-patch";
 import { shouldSubmitComment, sortSidebarComments } from "./sidebar-preferences";
-import { sidebarContentSignature, type SidebarDraft } from "./sidebar-signature";
+import { commentCardSignature, sidebarContentSignature, type SidebarDraft } from "./sidebar-signature";
 import { formatSidebarTimestamp } from "./timestamp";
 import {
   addComment,
@@ -115,28 +116,28 @@ export class CommentSidebar extends ItemView {
 
   startDraft(file: TFile, anchor: Anchor): void {
     this.draft = { filePath: file.path, anchor, kind: "comment" };
-    void this.render({ force: true });
+    void this.render();
   }
 
   startSuggestionDraft(file: TFile, anchor: Anchor): void {
     this.draft = { filePath: file.path, anchor, kind: "suggestion" };
-    void this.render({ force: true });
+    void this.render();
   }
 
   focusComment(id: string): void {
     this.focusedId = id;
     this.revealThreadEndId = id;
-    void this.render({ force: true });
+    void this.render();
   }
 
   toggleResolved(): void {
     this.showResolved = !this.showResolved;
-    void this.render({ force: true });
+    void this.render();
   }
 
   settingsChanged(resetResolved: boolean): void {
     if (resetResolved) this.showResolved = this.plugin.settings.showResolvedByDefault;
-    void this.render({ force: true });
+    void this.render({ rebuild: true });
   }
 
   refreshAuthorColors(): void {
@@ -160,7 +161,7 @@ export class CommentSidebar extends ItemView {
     );
   }
 
-  async render(opts?: { force?: boolean }): Promise<void> {
+  async render(opts?: { rebuild?: boolean }): Promise<void> {
     const container = this.contentEl;
     const file = this.app.workspace.getActiveFile();
     if (!file || file.extension !== "md") {
@@ -172,8 +173,12 @@ export class CommentSidebar extends ItemView {
       return;
     }
     const doc = await this.plugin.readDoc(file);
-    const signature = sidebarContentSignature(file.path, doc, this.showResolved, this.draft);
-    if (!opts?.force && !this.focusedId && signature === this.lastContentSignature) {
+    const all = doc.error ? [] : resolveAll(doc.prose, doc.comments);
+    const signature = sidebarContentSignature(file.path, doc, this.showResolved, this.draft, all);
+    const rebuild = !!opts?.rebuild;
+    if (!rebuild && signature === this.lastContentSignature) {
+      this.applyFocus(container);
+      this.revealThreadEnd(container);
       recordSidebarSkip();
       return;
     }
@@ -181,28 +186,34 @@ export class CommentSidebar extends ItemView {
     recordSidebarRender();
 
     const prevScroll = container.scrollTop;
-    container.empty();
     container.addClass("tc-sidebar");
 
     if (doc.error) {
+      container.empty();
       container.createDiv({ text: "tandem-comments block is invalid: " + doc.error, cls: "tc-error" });
       return;
     }
 
-    const header = container.createDiv({ cls: "tc-header" });
-    header.createSpan({ text: "Comments", cls: "tc-title" });
-    const toggle = header.createEl("button", {
-      text: this.showResolved ? "Hide resolved" : "Show resolved",
-      cls: "tc-toggle",
-    });
-    toggle.onclick = () => this.toggleResolved();
-    const exportBtn = header.createEl("button", { text: "Export", cls: "tc-toggle" });
-    exportBtn.onclick = () => void this.plugin.exportComments(file);
+    let header = container.querySelector<HTMLElement>(".tc-header");
+    if (!header || header.dataset.tcFile !== file.path) {
+      container.empty();
+      header = container.createDiv({ cls: "tc-header" });
+      header.dataset.tcFile = file.path;
+      header.createSpan({ text: "Comments", cls: "tc-title" });
+      const toggle = header.createEl("button", {
+        text: this.showResolved ? "Hide resolved" : "Show resolved",
+        cls: "tc-toggle",
+      });
+      toggle.onclick = () => this.toggleResolved();
+      const exportBtn = header.createEl("button", { text: "Export", cls: "tc-toggle" });
+      exportBtn.onclick = () => void this.plugin.exportComments(file);
+    } else {
+      const toggle = header.querySelector<HTMLButtonElement>("button.tc-toggle");
+      if (toggle) toggle.setText(this.showResolved ? "Hide resolved" : "Show resolved");
+    }
 
-    if (this.draft && this.draft.filePath === file.path) this.renderDraft(container, file);
-    else this.draft = null;
+    if (this.draft && this.draft.filePath !== file.path) this.draft = null;
 
-    const all = resolveAll(doc.prose, doc.comments);
     const open = this.sortComments(
       all.filter((r) => r.comment.status === "open" && r.resolution.kind === "resolved")
     );
@@ -211,31 +222,100 @@ export class CommentSidebar extends ItemView {
     );
     const done = this.sortComments(all.filter((r) => r.comment.status === "resolved"));
 
-    if (!open.length && !orphans.length && !(this.showResolved && done.length) && !this.draft) {
-      container.createDiv({ text: "No comments or suggestions in this file.", cls: "tc-empty" });
-      return;
+    type PatchModel =
+      | { type: "draft" }
+      | { type: "empty" }
+      | { type: "section"; title: string }
+      | { type: "card"; r: ResolvedComment };
+    const items: KeyedSignature[] = [];
+    const models = new Map<string, PatchModel>();
+    const push = (key: string, signature: string, model: PatchModel): void => {
+      items.push({ key, signature });
+      models.set(key, model);
+    };
+
+    if (this.draft && this.draft.filePath === file.path) {
+      push(
+        "draft",
+        [this.draft.kind, this.draft.anchor.exact, String(this.draft.anchor.pos ?? "")].join("\0"),
+        { type: "draft" }
+      );
     }
 
-    for (const r of open) this.renderComment(container, file, r);
-    if (orphans.length) {
-      container.createDiv({ text: "Orphaned — text passage not found", cls: "tc-section" });
-      for (const r of orphans) this.renderComment(container, file, r);
+    if (!open.length && !orphans.length && !(this.showResolved && done.length) && !this.draft) {
+      push("empty", "empty", { type: "empty" });
+    } else {
+      for (const r of open) push(`card:${r.id}`, commentCardSignature(r), { type: "card", r });
+      if (orphans.length) {
+        push("section:orphans", "orphans", {
+          type: "section",
+          title: "Orphaned — text passage not found",
+        });
+        for (const r of orphans) push(`card:${r.id}`, commentCardSignature(r), { type: "card", r });
+      }
+      if (this.showResolved && done.length) {
+        push("section:resolved", "resolved", { type: "section", title: "Resolved" });
+        for (const r of done) push(`card:${r.id}`, commentCardSignature(r), { type: "card", r });
+      }
     }
-    if (this.showResolved && done.length) {
-      container.createDiv({ text: "Resolved", cls: "tc-section" });
-      for (const r of done) this.renderComment(container, file, r);
-    }
+
+    reconcileKeyedChildren(
+      container,
+      header,
+      items,
+      (item) => {
+        const model = models.get(item.key)!;
+        if (model.type === "draft") return this.renderDraft(container, file);
+        if (model.type === "empty") {
+          return container.createDiv({
+            text: "No comments or suggestions in this file.",
+            cls: "tc-empty",
+          });
+        }
+        if (model.type === "section") {
+          return container.createDiv({ text: model.title, cls: "tc-section" });
+        }
+        return this.renderComment(container, file, model.r);
+      },
+      rebuild
+    );
+
+    this.applyFocus(container);
+    this.revealThreadEnd(container);
+    this.refreshTimestamps();
     container.scrollTop = prevScroll;
   }
 
-  private renderDraft(container: HTMLElement, file: TFile): void {
+  private applyFocus(container: HTMLElement): void {
+    if (!this.focusedId) return;
+    for (const el of Array.from(container.querySelectorAll(".tc-focused"))) el.removeClass("tc-focused");
+    container.querySelector<HTMLElement>(`[data-tc-key="card:${this.focusedId}"]`)?.addClass("tc-focused");
+    this.focusedId = null;
+  }
+
+  private revealThreadEnd(container: HTMLElement): void {
+    const id = this.revealThreadEndId;
+    if (!id) return;
+    this.revealThreadEndId = null;
+    const card = container.querySelector<HTMLElement>(`[data-tc-key="card:${id}"]`);
+    if (!card) return;
+    window.setTimeout(() => {
+      const latest =
+        card.querySelector<HTMLElement>(".tc-entry:last-child") ??
+        card.querySelector<HTMLElement>(".tc-reply") ??
+        card;
+      latest.scrollIntoView({ block: "nearest" });
+    }, 0);
+  }
+
+  private renderDraft(container: HTMLElement, file: TFile): HTMLElement {
     const draft = this.draft;
-    if (!draft) return;
+    if (!draft) return container.createDiv({ cls: "tc-card tc-draft" });
     const card = container.createDiv({ cls: "tc-card tc-draft" });
     card.createDiv({ text: `"${truncate(draft.anchor.exact, 80)}"`, cls: "tc-quote" });
     if (draft.kind === "suggestion") {
       this.renderSuggestionDraft(card, file, draft);
-      return;
+      return card;
     }
     const input = card.createEl("textarea", {
       cls: "tc-input",
@@ -275,6 +355,7 @@ export class CommentSidebar extends ItemView {
           });
       }
     };
+    return card;
   }
 
   private renderSuggestionDraft(card: HTMLElement, file: TFile, draft: Draft): void {
@@ -350,7 +431,7 @@ export class CommentSidebar extends ItemView {
     window.setTimeout(() => replacement.focus(), 0);
   }
 
-  private renderComment(container: HTMLElement, file: TFile, r: ResolvedComment): void {
+  private renderComment(container: HTMLElement, file: TFile, r: ResolvedComment): HTMLElement {
     const cls = ["tc-card"];
     if (r.comment.status === "resolved") cls.push("tc-resolved");
     if (
@@ -449,13 +530,6 @@ export class CommentSidebar extends ItemView {
           );
         });
     };
-    if (r.id === this.focusedId) {
-      card.addClass("tc-focused");
-      this.focusedId = null;
-    }
-    const shouldRevealEnd = r.id === this.revealThreadEndId;
-    if (shouldRevealEnd) this.revealThreadEndId = null;
-
     if (r.comment.suggestion) {
       const suggestion = r.comment.suggestion;
       const replacement =
@@ -736,16 +810,7 @@ export class CommentSidebar extends ItemView {
       reBtn.onclick = () => this.reanchorFromSelection(file, r.id);
     }
     if (!actions.hasChildNodes()) actions.remove();
-
-    if (shouldRevealEnd) {
-      window.setTimeout(() => {
-        const latest =
-          card.querySelector<HTMLElement>(".tc-entry:last-child") ??
-          card.querySelector<HTMLElement>(".tc-reply") ??
-          card;
-        latest.scrollIntoView({ block: "nearest" });
-      }, 0);
-    }
+    return card;
   }
 
   private shouldSubmit(event: KeyboardEvent): boolean {
