@@ -203,17 +203,103 @@ function contextMatches(prose: string, at: number, len: number, anchor: Anchor):
   return true;
 }
 
-export function resolveAnchor(prose: string, anchor: Anchor): AnchorResolution {
-  const exact = anchor.exact;
-  if (!exact) return { kind: "orphaned" };
+/** True when `prose[from:to]` is still this quote — skip a full-note search. */
+export function anchorStillAt(prose: string, from: number, to: number, exact: string): boolean {
+  return (
+    exact.length > 0 &&
+    from >= 0 &&
+    to <= prose.length &&
+    to - from === exact.length &&
+    prose.slice(from, to) === exact
+  );
+}
+
+function findExactMatches(prose: string, exact: string): number[] {
+  if (!exact) return [];
   const matches: number[] = [];
   let i = prose.indexOf(exact);
   while (i !== -1) {
     matches.push(i);
     i = prose.indexOf(exact, i + 1);
   }
-  if (matches.length === 0) return { kind: "orphaned" };
-  let cands = matches;
+  return matches;
+}
+
+interface AcNode {
+  children: Map<number, AcNode>;
+  fail: AcNode | null;
+  outputs: string[];
+}
+
+function acFindAll(prose: string, exacts: string[]): Map<string, number[]> {
+  const root: AcNode = { children: new Map(), fail: null, outputs: [] };
+  for (const exact of exacts) {
+    let n = root;
+    for (let i = 0; i < exact.length; i++) {
+      const c = exact.charCodeAt(i);
+      let next = n.children.get(c);
+      if (!next) {
+        next = { children: new Map(), fail: null, outputs: [] };
+        n.children.set(c, next);
+      }
+      n = next;
+    }
+    n.outputs.push(exact);
+  }
+  const q: AcNode[] = [];
+  for (const child of root.children.values()) {
+    child.fail = root;
+    q.push(child);
+  }
+  for (let qi = 0; qi < q.length; qi++) {
+    const n = q[qi];
+    for (const [c, child] of n.children) {
+      let f: AcNode | null = n.fail;
+      while (f && f !== root && !f.children.has(c)) f = f.fail;
+      child.fail = f?.children.get(c) ?? root;
+      if (child.fail.outputs.length) child.outputs = child.outputs.concat(child.fail.outputs);
+      q.push(child);
+    }
+  }
+  const found = new Map<string, number[]>();
+  for (const exact of exacts) found.set(exact, []);
+  let n: AcNode = root;
+  for (let i = 0; i < prose.length; i++) {
+    const c = prose.charCodeAt(i);
+    while (n !== root && !n.children.has(c)) n = n.fail ?? root;
+    n = n.children.get(c) ?? root;
+    for (const exact of n.outputs) {
+      found.get(exact)!.push(i - exact.length + 1);
+    }
+  }
+  return found;
+}
+
+/**
+ * All start offsets of each unique `exact` in `prose`. One scan of the text
+ * when there are two or more quotes; native `indexOf` for a single quote.
+ */
+export function matchPositionsByExact(prose: string, exacts: Iterable<string>): Map<string, number[]> {
+  const unique: string[] = [];
+  const seen = new Set<string>();
+  for (const exact of exacts) {
+    if (!exact || seen.has(exact)) continue;
+    seen.add(exact);
+    unique.push(exact);
+  }
+  if (unique.length === 0) return new Map();
+  if (unique.length === 1) return new Map([[unique[0], findExactMatches(prose, unique[0])]]);
+  return acFindAll(prose, unique);
+}
+
+export function resolutionFromMatches(
+  prose: string,
+  anchor: Anchor,
+  matches: readonly number[]
+): AnchorResolution {
+  const exact = anchor.exact;
+  if (!exact || matches.length === 0) return { kind: "orphaned" };
+  let cands: number[] = matches as number[];
   if (cands.length > 1) {
     const filtered = cands.filter((m) => contextMatches(prose, m, exact.length, anchor));
     if (filtered.length > 0) cands = filtered;
@@ -225,6 +311,10 @@ export function resolveAnchor(prose: string, anchor: Anchor): AnchorResolution {
     best = cands.reduce((a, b) => (Math.abs(b - pos) < Math.abs(a - pos) ? b : a));
   }
   return { kind: "resolved", start: best, end: best + exact.length, ambiguous: true };
+}
+
+export function resolveAnchor(prose: string, anchor: Anchor): AnchorResolution {
+  return resolutionFromMatches(prose, anchor, findExactMatches(prose, anchor.exact));
 }
 
 export function makeAnchor(prose: string, start: number, end: number): Anchor {
@@ -393,9 +483,19 @@ export function acceptSuggestion(
   }
 
   const oldProse = doc.prose;
-  const survivingAnchors = Object.entries(doc.comments).flatMap(([otherId, other]) => {
-    if (otherId === id || other.status !== "open") return [];
-    const otherResolution = resolveAnchor(oldProse, other.anchor);
+  const surviving = Object.entries(doc.comments).filter(
+    ([otherId, other]) => otherId !== id && other.status === "open"
+  );
+  const survivingMatches = matchPositionsByExact(
+    oldProse,
+    surviving.map(([, other]) => other.anchor.exact)
+  );
+  const survivingAnchors = surviving.flatMap(([otherId, other]) => {
+    const otherResolution = resolutionFromMatches(
+      oldProse,
+      other.anchor,
+      survivingMatches.get(other.anchor.exact) ?? []
+    );
     return otherResolution.kind === "resolved" && !otherResolution.ambiguous
       ? [{ id: otherId, from: otherResolution.start, to: otherResolution.end }]
       : [];
@@ -469,7 +569,12 @@ export function generateId(existing: CommentMap): string {
 }
 
 export function resolveAll(prose: string, comments: CommentMap): ResolvedComment[] {
-  return Object.entries(comments).map(([id, comment]) => {
+  const entries = Object.entries(comments);
+  const matches = matchPositionsByExact(
+    prose,
+    entries.map(([, comment]) => comment.anchor.exact)
+  );
+  return entries.map(([id, comment]) => {
     const acceptedHistory =
       comment.status === "resolved" &&
       isSuggestionObject(comment.suggestion) &&
@@ -479,7 +584,9 @@ export function resolveAll(prose: string, comments: CommentMap): ResolvedComment
       comment,
       // The retained anchor describes the text that was replaced, not a safe
       // navigation target in the resulting prose.
-      resolution: acceptedHistory ? { kind: "orphaned" } : resolveAnchor(prose, comment.anchor),
+      resolution: acceptedHistory
+        ? { kind: "orphaned" }
+        : resolutionFromMatches(prose, comment.anchor, matches.get(comment.anchor.exact) ?? []),
     };
   });
 }

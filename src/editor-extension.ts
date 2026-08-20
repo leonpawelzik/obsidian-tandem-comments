@@ -19,13 +19,15 @@ import {
 } from "./reanchor";
 import {
   FENCE_OPEN,
+  anchorStillAt,
   fenceStartsAt,
   makeAnchor,
+  matchPositionsByExact,
   normalizeTrailingChanges,
   parseDocument,
   proseEndOf,
   proseEndOfText,
-  resolveAnchor,
+  resolutionFromMatches,
   serializeDocument,
   type TextSlice,
 } from "./store";
@@ -164,9 +166,13 @@ function editorAnchorTrackerClass(plugin: EditorExtensionHost) {
         }
         this.proseEnd = doc.prose.length;
         this.hasBlock = fenceStartsAt(this.view.state.doc, this.proseEnd);
-        for (const [id, c] of Object.entries(doc.comments)) {
-          if (c.status === "resolved") continue;
-          const r = resolveAnchor(doc.prose, c.anchor);
+        const open = Object.entries(doc.comments).filter(([, c]) => c.status !== "resolved");
+        const matches = matchPositionsByExact(
+          doc.prose,
+          open.map(([, c]) => c.anchor.exact)
+        );
+        for (const [id, c] of open) {
+          const r = resolutionFromMatches(doc.prose, c.anchor, matches.get(c.anchor.exact) ?? []);
           if (r.kind === "resolved") this.anchors.push({ id, from: r.start, to: r.end });
         }
         this.anchors.sort((a, b) => a.from - b.from);
@@ -238,12 +244,17 @@ function editorAnchorTrackerClass(plugin: EditorExtensionHost) {
             recordParse();
             const doc = parseDocument(text);
             if (!doc.error) {
+              const open = Object.entries(doc.comments).filter(([, comment]) => comment.status === "open");
+              const matches = matchPositionsByExact(
+                doc.prose,
+                open.map(([, comment]) => comment.anchor.exact)
+              );
               const recoverable = new Set(
-                Object.entries(doc.comments)
+                open
                   .filter(
                     ([, comment]) =>
-                      comment.status === "open" &&
-                      resolveAnchor(doc.prose, comment.anchor).kind === "orphaned"
+                      resolutionFromMatches(doc.prose, comment.anchor, matches.get(comment.anchor.exact) ?? [])
+                        .kind === "orphaned"
                   )
                   .map(([id]) => id)
               );
@@ -271,9 +282,15 @@ function editorAnchorTrackerClass(plugin: EditorExtensionHost) {
             this.anchors = mapped;
             recordParse();
             const doc = parseDocument(text);
-            for (const [id, c] of Object.entries(doc.comments)) {
-              if (c.status === "resolved" || survived.has(id)) continue;
-              const r = resolveAnchor(doc.prose, c.anchor);
+            const rest = Object.entries(doc.comments).filter(
+              ([id, c]) => c.status !== "resolved" && !survived.has(id)
+            );
+            const matches = matchPositionsByExact(
+              doc.prose,
+              rest.map(([, c]) => c.anchor.exact)
+            );
+            for (const [id, c] of rest) {
+              const r = resolutionFromMatches(doc.prose, c.anchor, matches.get(c.anchor.exact) ?? []);
               if (r.kind === "resolved") this.anchors.push({ id, from: r.start, to: r.end });
             }
             this.anchors.sort((a, b) => a.from - b.from);
@@ -373,12 +390,28 @@ function editorAnchorTrackerClass(plugin: EditorExtensionHost) {
         if (this.dirty) {
           this.dirty = false;
           if (Object.keys(doc.comments).length > 0) {
+            const needSearch: TrackedAnchor[] = [];
             for (const t of this.anchors) {
               const c = doc.comments[t.id];
-              if (!c || c.status === "resolved") continue;
-              if (t.to > doc.prose.length) continue;
+              if (!c || c.status === "resolved" || t.to > doc.prose.length) continue;
+              if (anchorStillAt(doc.prose, t.from, t.to, c.anchor.exact)) continue;
+              needSearch.push(t);
+            }
+            const matches =
+              needSearch.length === 0
+                ? null
+                : matchPositionsByExact(
+                    doc.prose,
+                    needSearch.map((t) => doc.comments[t.id].anchor.exact)
+                  );
+            for (const t of needSearch) {
+              const c = doc.comments[t.id];
               const cur = c.anchor;
-              if (resolveAnchor(doc.prose, cur).kind === "resolved") continue;
+              if (
+                resolutionFromMatches(doc.prose, cur, matches!.get(cur.exact) ?? []).kind === "resolved"
+              ) {
+                continue;
+              }
               const next = makeAnchor(doc.prose, t.from, t.to);
               if (
                 next.exact &&
