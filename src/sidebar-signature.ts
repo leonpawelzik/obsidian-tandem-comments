@@ -6,26 +6,23 @@ export interface SidebarDraft {
   kind: "comment" | "suggestion";
 }
 
-/** Display-relevant signature of one sidebar card. Pure — no Obsidian imports. */
+/**
+ * Display-relevant signature of one sidebar card.
+ * Serializes the whole comment (unknown fields included) plus resolution.
+ * Anchor `pos` is omitted so a persist-only pos rewrite does not rebuild the card.
+ */
 export function commentCardSignature(r: ResolvedComment): string {
-  const c = r.comment;
-  const parts: string[] = [r.id, c.status, r.resolution.kind];
-  if (r.resolution.kind === "resolved") {
-    parts.push(String(r.resolution.start), String(r.resolution.end), r.resolution.ambiguous ? "a" : "");
-  }
-  parts.push(c.anchor.exact);
-  for (const t of c.thread) {
-    parts.push(t.author, t.ts, t.text);
-  }
-  if (c.suggestion) {
-    parts.push(c.suggestion.replacement, c.suggestion.author, c.suggestion.ts, c.suggestion.result ?? "");
-  }
-  return parts.join("\0");
+  const { pos: _pos, ...anchor } = r.comment.anchor;
+  return JSON.stringify({
+    id: r.id,
+    resolution: r.resolution,
+    comment: { ...r.comment, anchor },
+  });
 }
 
 function draftSignature(filePath: string, draft: SidebarDraft | null): string {
   if (!draft || draft.filePath !== filePath) return "";
-  return ["draft", draft.kind, draft.anchor.exact, String(draft.anchor.pos ?? "")].join("\0");
+  return JSON.stringify(draft);
 }
 
 /**

@@ -112,4 +112,16 @@ describe("sidebarContentSignature", () => {
     expect(commentCardSignature(firstAfter)).toBe(commentCardSignature(first));
     expect(commentCardSignature(secondAfter)).not.toBe(commentCardSignature(second));
   });
+
+  it("rebuilds when an unknown comment field changes, without listing that field", () => {
+    const [plain] = resolveAll(base.prose, base.comments);
+    const withExtra = {
+      ...plain,
+      comment: {
+        ...plain.comment,
+        lifecycle: { outcome: "promoted-note", at: "2026-01-01T00:00:00Z" },
+      },
+    };
+    expect(commentCardSignature(withExtra)).not.toBe(commentCardSignature(plain));
+  });
 });

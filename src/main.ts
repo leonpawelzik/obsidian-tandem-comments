@@ -14,7 +14,6 @@ import {
   renderExportFileName,
   resolveExportDirectory,
 } from "./export";
-import { formatPerfSnapshot, resetPerf, setPerfEnabled } from "./perf";
 import { registerReadingView } from "./reading-view";
 import { CommentsSettingTab } from "./settings";
 import {
@@ -24,6 +23,7 @@ import {
   settingsEffects,
 } from "./settings-model";
 import { CommentSidebar, VIEW_TYPE_COMMENTS } from "./sidebar";
+import { formatPerfSnapshot, resetPerf, setPerfEnabled } from "./perf";
 import { commitSuggestionAcceptance } from "./suggestion-editor";
 import {
   type SuggestionAcceptancePlan,

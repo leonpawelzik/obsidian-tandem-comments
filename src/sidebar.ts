@@ -154,11 +154,13 @@ export class CommentSidebar extends ItemView {
     }
   }
 
-  /** Nicht neu rendern, während in einem Eingabefeld getippter Text verloren ginge. */
+  /**
+   * Skip vault.modify redraws while the user is mid-input.
+   * Other UI can opt in with class `tc-busy` or attribute `data-tc-busy`.
+   */
   private hasPendingInput(): boolean {
-    return Array.from(this.contentEl.querySelectorAll("textarea")).some(
-      (t) => t.value.length > 0 || t.classList.contains("tc-edit-input")
-    );
+    if (this.contentEl.querySelector(".tc-busy, [data-tc-busy], .tc-edit-input")) return true;
+    return Array.from(this.contentEl.querySelectorAll("textarea")).some((t) => t.value.length > 0);
   }
 
   async render(opts?: { rebuild?: boolean }): Promise<void> {
@@ -185,7 +187,6 @@ export class CommentSidebar extends ItemView {
     this.lastContentSignature = signature;
     recordSidebarRender();
 
-    const prevScroll = container.scrollTop;
     container.addClass("tc-sidebar");
 
     if (doc.error) {
@@ -194,23 +195,8 @@ export class CommentSidebar extends ItemView {
       return;
     }
 
-    let header = container.querySelector<HTMLElement>(".tc-header");
-    if (!header || header.dataset.tcFile !== file.path) {
-      container.empty();
-      header = container.createDiv({ cls: "tc-header" });
-      header.dataset.tcFile = file.path;
-      header.createSpan({ text: "Comments", cls: "tc-title" });
-      const toggle = header.createEl("button", {
-        text: this.showResolved ? "Hide resolved" : "Show resolved",
-        cls: "tc-toggle",
-      });
-      toggle.onclick = () => this.toggleResolved();
-      const exportBtn = header.createEl("button", { text: "Export", cls: "tc-toggle" });
-      exportBtn.onclick = () => void this.plugin.exportComments(file);
-    } else {
-      const toggle = header.querySelector<HTMLButtonElement>("button.tc-toggle");
-      if (toggle) toggle.setText(this.showResolved ? "Hide resolved" : "Show resolved");
-    }
+    const { list } = this.ensureListChrome(container, file);
+    const prevScroll = list.scrollTop;
 
     if (this.draft && this.draft.filePath !== file.path) this.draft = null;
 
@@ -260,22 +246,22 @@ export class CommentSidebar extends ItemView {
     }
 
     reconcileKeyedChildren(
-      container,
-      header,
+      list,
+      null,
       items,
       (item) => {
         const model = models.get(item.key)!;
-        if (model.type === "draft") return this.renderDraft(container, file);
+        if (model.type === "draft") return this.renderDraft(list, file);
         if (model.type === "empty") {
-          return container.createDiv({
+          return list.createDiv({
             text: "No comments or suggestions in this file.",
             cls: "tc-empty",
           });
         }
         if (model.type === "section") {
-          return container.createDiv({ text: model.title, cls: "tc-section" });
+          return list.createDiv({ text: model.title, cls: "tc-section" });
         }
-        return this.renderComment(container, file, model.r);
+        return this.renderComment(list, file, model.r);
       },
       rebuild
     );
@@ -283,7 +269,35 @@ export class CommentSidebar extends ItemView {
     this.applyFocus(container);
     this.revealThreadEnd(container);
     this.refreshTimestamps();
-    container.scrollTop = prevScroll;
+    list.scrollTop = prevScroll;
+  }
+
+  /**
+   * Header and list are siblings so other chrome (e.g. a bottom dock) can live
+   * on `contentEl` without being patched as a card.
+   */
+  private ensureListChrome(container: HTMLElement, file: TFile): { header: HTMLElement; list: HTMLElement } {
+    let header = container.querySelector<HTMLElement>(".tc-header");
+    let list = container.querySelector<HTMLElement>(".tc-sidebar-list");
+    if (!header || header.dataset.tcFile !== file.path) {
+      container.empty();
+      header = container.createDiv({ cls: "tc-header" });
+      header.dataset.tcFile = file.path;
+      header.createSpan({ text: "Comments", cls: "tc-title" });
+      const toggle = header.createEl("button", {
+        text: this.showResolved ? "Hide resolved" : "Show resolved",
+        cls: "tc-toggle",
+      });
+      toggle.onclick = () => this.toggleResolved();
+      const exportBtn = header.createEl("button", { text: "Export", cls: "tc-toggle" });
+      exportBtn.onclick = () => void this.plugin.exportComments(file);
+      list = container.createDiv({ cls: "tc-sidebar-list" });
+      return { header, list };
+    }
+    if (!list) list = container.createDiv({ cls: "tc-sidebar-list" });
+    const toggle = header.querySelector<HTMLButtonElement>("button.tc-toggle");
+    if (toggle) toggle.setText(this.showResolved ? "Hide resolved" : "Show resolved");
+    return { header, list };
   }
 
   private applyFocus(container: HTMLElement): void {
@@ -727,38 +741,7 @@ export class CommentSidebar extends ItemView {
       };
     }
 
-    if (r.comment.status === "open") {
-      const replyWrap = card.createDiv({ cls: "tc-reply" });
-      const reply = replyWrap.createEl("textarea", {
-        cls: "tc-input tc-reply-input",
-        attr: {
-          placeholder:
-            this.plugin.settings.submitShortcut === "enter"
-              ? "Reply… (Enter = send)"
-              : "Reply… (Cmd/Ctrl+Enter = send)",
-          rows: "2",
-          "aria-label": "Reply to thread",
-        },
-      });
-      reply.onkeydown = (e) => {
-        if (this.shouldSubmit(e)) {
-          e.preventDefault();
-          const text = reply.value.trim();
-          if (!text) return;
-          reply.value = "";
-          this.revealThreadEndId = r.id;
-          void this.plugin
-            .updateDoc(file, (d) =>
-              addReply(d.comments, r.id, this.plugin.currentAuthor(), this.plugin.nowTs(), text)
-            )
-            .then((ok) => {
-              // Force a paint even if vault.modify coalesces oddly; revealThreadEndId
-              // scrolls the new latest entry into view above the composer.
-              if (ok) void this.render();
-            });
-        }
-      };
-    }
+    this.renderReplyComposer(card, file, r);
 
     const actions = card.createDiv({ cls: "tc-actions" });
     if (r.comment.status === "open" && r.comment.suggestion && !r.comment.suggestion.result) {
@@ -811,6 +794,38 @@ export class CommentSidebar extends ItemView {
     }
     if (!actions.hasChildNodes()) actions.remove();
     return card;
+  }
+
+  private renderReplyComposer(card: HTMLElement, file: TFile, r: ResolvedComment): void {
+    if (r.comment.status !== "open") return;
+    const replyWrap = card.createDiv({ cls: "tc-reply" });
+    const reply = replyWrap.createEl("textarea", {
+      cls: "tc-input tc-reply-input",
+      attr: {
+        placeholder:
+          this.plugin.settings.submitShortcut === "enter"
+            ? "Reply… (Enter = send)"
+            : "Reply… (Cmd/Ctrl+Enter = send)",
+        rows: "2",
+        "aria-label": "Reply to thread",
+      },
+    });
+    reply.onkeydown = (e) => {
+      if (this.shouldSubmit(e)) {
+        e.preventDefault();
+        const text = reply.value.trim();
+        if (!text) return;
+        reply.value = "";
+        this.revealThreadEndId = r.id;
+        void this.plugin
+          .updateDoc(file, (d) =>
+            addReply(d.comments, r.id, this.plugin.currentAuthor(), this.plugin.nowTs(), text)
+          )
+          .then((ok) => {
+            if (ok) void this.render();
+          });
+      }
+    };
   }
 
   private shouldSubmit(event: KeyboardEvent): boolean {
