@@ -22,6 +22,8 @@ export interface CommentsSettings {
   confirmDestructiveActions: boolean;
   showReadingViewIndicator: boolean;
   schemaHint: boolean;
+  /** When true, record keystroke/persist counters and log budget overruns to the console. */
+  debugPerf: boolean;
   copyIncludeQuote: boolean;
   exportNameTemplate: string;
   exportScope: ExportScope;
@@ -43,6 +45,7 @@ export const DEFAULT_SETTINGS: CommentsSettings = {
   confirmDestructiveActions: true,
   showReadingViewIndicator: true,
   schemaHint: true,
+  debugPerf: false,
   copyIncludeQuote: true,
   exportNameTemplate: "{{filename}} – Comments",
   exportScope: "all",
@@ -145,6 +148,7 @@ export function parseCommentsSettings(value: unknown): ParsedCommentsSettings {
       DEFAULT_SETTINGS.showReadingViewIndicator
     ),
     schemaHint: booleanSetting(raw.schemaHint, DEFAULT_SETTINGS.schemaHint),
+    debugPerf: booleanSetting(raw.debugPerf, DEFAULT_SETTINGS.debugPerf),
     copyIncludeQuote: booleanSetting(raw.copyIncludeQuote, DEFAULT_SETTINGS.copyIncludeQuote),
     exportNameTemplate: template || DEFAULT_SETTINGS.exportNameTemplate,
     exportScope: enumSetting(raw.exportScope, ["all", "open"] as const, DEFAULT_SETTINGS.exportScope),

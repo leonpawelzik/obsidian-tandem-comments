@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { makeAnchor, resolveAnchor } from "../src/store";
+import {
+  anchorStillAt,
+  makeAnchor,
+  matchPositionsByExact,
+  resolveAll,
+  resolveAnchor,
+} from "../src/store";
 
 describe("resolveAnchor", () => {
   it("resolves a unique verbatim match", () => {
@@ -64,5 +70,56 @@ describe("makeAnchor", () => {
     const a = makeAnchor(prose, 8, 11); // das mittlere "abc"
     const r = resolveAnchor(prose, a);
     expect(r).toEqual({ kind: "resolved", start: 8, end: 11 });
+  });
+});
+
+describe("matchPositionsByExact", () => {
+  function naive(prose: string, exacts: string[]): Map<string, number[]> {
+    const found = new Map<string, number[]>();
+    for (const exact of exacts) {
+      const hits: number[] = [];
+      if (!exact) continue;
+      let i = prose.indexOf(exact);
+      while (i !== -1) {
+        hits.push(i);
+        i = prose.indexOf(exact, i + 1);
+      }
+      found.set(exact, hits);
+    }
+    return found;
+  }
+
+  it("finds overlapping and suffix patterns in one scan", () => {
+    const prose = "she sells sea shells";
+    const exacts = ["he", "she", "sea", "sells"];
+    const got = matchPositionsByExact(prose, exacts);
+    const expected = naive(prose, exacts);
+    for (const exact of exacts) {
+      expect(got.get(exact)).toEqual(expected.get(exact));
+    }
+  });
+
+  it("finds overlapping repeats of the same quote", () => {
+    expect(matchPositionsByExact("aaa", ["aa"]).get("aa")).toEqual([0, 1]);
+  });
+
+  it("resolveAll matches per-comment resolveAnchor", () => {
+    const prose = "Preis senken. Kosten senken. Risiko senken.";
+    const comments = {
+      a: { anchor: { exact: "senken", prefix: "Kosten ", suffix: "." }, status: "open" as const, thread: [] },
+      b: { anchor: { exact: "Preis senken" }, status: "open" as const, thread: [] },
+      c: { anchor: { exact: "missing" }, status: "open" as const, thread: [] },
+    };
+    const all = resolveAll(prose, comments);
+    for (const r of all) {
+      expect(r.resolution).toEqual(resolveAnchor(prose, r.comment.anchor));
+    }
+  });
+
+  it("anchorStillAt is true only for the live mapped range", () => {
+    const prose = "hello quoted world";
+    expect(anchorStillAt(prose, 6, 12, "quoted")).toBe(true);
+    expect(anchorStillAt(prose, 6, 12, "hello")).toBe(false);
+    expect(anchorStillAt(prose, 0, 5, "quoted")).toBe(false);
   });
 });

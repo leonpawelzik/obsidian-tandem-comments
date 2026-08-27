@@ -62,8 +62,30 @@
   color: var(--text-normal);
 }
 
+.tc-thread {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
 .tc-entry {
   margin: 6px 0;
+  /* Keep the latest message clear of the reply composer when scrolled into view. */
+  scroll-margin-bottom: 5rem;
+}
+
+.tc-entry:last-child {
+  margin-bottom: 2px;
+}
+
+.tc-reply {
+  margin-top: 4px;
+  padding-top: 8px;
+  border-top: 1px solid var(--background-modifier-border);
+}
+
+.tc-reply .tc-input {
+  margin-top: 0;
 }
 
 .tc-meta {

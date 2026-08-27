@@ -63,6 +63,11 @@ describe("settings model", () => {
     });
   });
 
+  it("reads debugPerf without touching other settings", () => {
+    expect(parseCommentsSettings({ debugPerf: true }).settings.debugPerf).toBe(true);
+    expect(parseCommentsSettings({ debugPerf: "yes" }).settings.debugPerf).toBe(false);
+  });
+
   it("repairs invalid values and removes unknown keys", () => {
     const result = parseCommentsSettings({
       settingsVersion: 999,

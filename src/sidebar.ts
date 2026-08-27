@@ -16,7 +16,10 @@ import { resolveAuthorColor, type AuthorColorOverrides } from "./author-color";
 import { confirmAction } from "./confirm-action";
 import { formatComment, formatTs } from "./export";
 import type CommentsPlugin from "./main";
+import { recordSidebarRender, recordSidebarSkip } from "./perf";
+import { reconcileKeyedChildren, type KeyedSignature } from "./sidebar-patch";
 import { shouldSubmitComment, sortSidebarComments } from "./sidebar-preferences";
+import { commentCardSignature, sidebarContentSignature, type SidebarDraft } from "./sidebar-signature";
 import { formatSidebarTimestamp } from "./timestamp";
 import {
   addComment,
@@ -35,11 +38,7 @@ import type { Anchor, ResolvedComment } from "./types";
 
 export const VIEW_TYPE_COMMENTS = "tandem-comments-sidebar";
 
-interface Draft {
-  filePath: string;
-  anchor: Anchor;
-  kind: "comment" | "suggestion";
-}
+type Draft = SidebarDraft;
 
 function truncate(s: string, n: number): string {
   return s.length <= n ? s : s.slice(0, n - 1) + "…";
@@ -92,6 +91,10 @@ export class CommentSidebar extends ItemView implements HoverParent {
   private draft: Draft | null = null;
   private showResolved: boolean;
   private focusedId: string | null = null;
+  /** After a reply (or focus), scroll this card’s latest entry into view. */
+  private revealThreadEndId: string | null = null;
+  /** Last rendered UI signature — skip empty()+rebuild when unchanged. */
+  private lastContentSignature: string | null = null;
 
   constructor(leaf: WorkspaceLeaf, private plugin: CommentsPlugin) {
     super(leaf);
@@ -137,6 +140,7 @@ export class CommentSidebar extends ItemView implements HoverParent {
 
   focusComment(id: string): void {
     this.focusedId = id;
+    this.revealThreadEndId = id;
     void this.render();
   }
 
@@ -147,7 +151,7 @@ export class CommentSidebar extends ItemView implements HoverParent {
 
   settingsChanged(resetResolved: boolean): void {
     if (resetResolved) this.showResolved = this.plugin.settings.showResolvedByDefault;
-    void this.render();
+    void this.render({ rebuild: true });
   }
 
   refreshAuthorColors(): void {
@@ -164,44 +168,52 @@ export class CommentSidebar extends ItemView implements HoverParent {
     }
   }
 
-  /** Nicht neu rendern, während in einem Eingabefeld getippter Text verloren ginge. */
+  /**
+   * Skip vault.modify redraws while the user is mid-input.
+   * Other UI can opt in with class `tc-busy` or attribute `data-tc-busy`.
+   */
   private hasPendingInput(): boolean {
-    return Array.from(this.contentEl.querySelectorAll("textarea")).some(
-      (t) => t.value.length > 0 || t.classList.contains("tc-edit-input")
-    );
+    if (this.contentEl.querySelector(".tc-busy, [data-tc-busy], .tc-edit-input")) return true;
+    return Array.from(this.contentEl.querySelectorAll("textarea")).some((t) => t.value.length > 0);
   }
 
-  async render(): Promise<void> {
+  async render(opts?: { rebuild?: boolean }): Promise<void> {
     const container = this.contentEl;
-    const prevScroll = container.scrollTop;
-    container.empty();
-    container.addClass("tc-sidebar");
-
     const file = this.app.workspace.getActiveFile();
     if (!file || file.extension !== "md") {
+      this.lastContentSignature = null;
+      recordSidebarRender();
+      container.empty();
+      container.addClass("tc-sidebar");
       container.createDiv({ text: "No active Markdown file.", cls: "tc-empty" });
       return;
     }
     const doc = await this.plugin.readDoc(file);
+    const all = doc.error ? [] : resolveAll(doc.prose, doc.comments);
+    const signature = sidebarContentSignature(file.path, doc, this.showResolved, this.draft, all);
+    const rebuild = !!opts?.rebuild;
+    if (!rebuild && signature === this.lastContentSignature) {
+      this.applyFocus(container);
+      this.revealThreadEnd(container);
+      recordSidebarSkip();
+      return;
+    }
+    this.lastContentSignature = signature;
+    recordSidebarRender();
+
+    container.addClass("tc-sidebar");
+
     if (doc.error) {
+      container.empty();
       container.createDiv({ text: "tandem-comments block is invalid: " + doc.error, cls: "tc-error" });
       return;
     }
 
-    const header = container.createDiv({ cls: "tc-header" });
-    header.createSpan({ text: "Comments", cls: "tc-title" });
-    const toggle = header.createEl("button", {
-      text: this.showResolved ? "Hide resolved" : "Show resolved",
-      cls: "tc-toggle",
-    });
-    toggle.onclick = () => this.toggleResolved();
-    const exportBtn = header.createEl("button", { text: "Export", cls: "tc-toggle" });
-    exportBtn.onclick = () => void this.plugin.exportComments(file);
+    const { list } = this.ensureListChrome(container, file);
+    const prevScroll = list.scrollTop;
 
-    if (this.draft && this.draft.filePath === file.path) this.renderDraft(container, file);
-    else this.draft = null;
+    if (this.draft && this.draft.filePath !== file.path) this.draft = null;
 
-    const all = resolveAll(doc.prose, doc.comments);
     const open = this.sortComments(
       all.filter((r) => r.comment.status === "open" && r.resolution.kind === "resolved")
     );
@@ -210,31 +222,128 @@ export class CommentSidebar extends ItemView implements HoverParent {
     );
     const done = this.sortComments(all.filter((r) => r.comment.status === "resolved"));
 
-    if (!open.length && !orphans.length && !(this.showResolved && done.length) && !this.draft) {
-      container.createDiv({ text: "No comments or suggestions in this file.", cls: "tc-empty" });
-      return;
+    type PatchModel =
+      | { type: "draft" }
+      | { type: "empty" }
+      | { type: "section"; title: string }
+      | { type: "card"; r: ResolvedComment };
+    const items: KeyedSignature[] = [];
+    const models = new Map<string, PatchModel>();
+    const push = (key: string, signature: string, model: PatchModel): void => {
+      items.push({ key, signature });
+      models.set(key, model);
+    };
+
+    if (this.draft && this.draft.filePath === file.path) {
+      push(
+        "draft",
+        [this.draft.kind, this.draft.anchor.exact, String(this.draft.anchor.pos ?? "")].join("\0"),
+        { type: "draft" }
+      );
     }
 
-    for (const r of open) this.renderComment(container, file, r);
-    if (orphans.length) {
-      container.createDiv({ text: "Orphaned — text passage not found", cls: "tc-section" });
-      for (const r of orphans) this.renderComment(container, file, r);
+    if (!open.length && !orphans.length && !(this.showResolved && done.length) && !this.draft) {
+      push("empty", "empty", { type: "empty" });
+    } else {
+      for (const r of open) push(`card:${r.id}`, commentCardSignature(r), { type: "card", r });
+      if (orphans.length) {
+        push("section:orphans", "orphans", {
+          type: "section",
+          title: "Orphaned — text passage not found",
+        });
+        for (const r of orphans) push(`card:${r.id}`, commentCardSignature(r), { type: "card", r });
+      }
+      if (this.showResolved && done.length) {
+        push("section:resolved", "resolved", { type: "section", title: "Resolved" });
+        for (const r of done) push(`card:${r.id}`, commentCardSignature(r), { type: "card", r });
+      }
     }
-    if (this.showResolved && done.length) {
-      container.createDiv({ text: "Resolved", cls: "tc-section" });
-      for (const r of done) this.renderComment(container, file, r);
-    }
-    container.scrollTop = prevScroll;
+
+    reconcileKeyedChildren(
+      list,
+      null,
+      items,
+      (item) => {
+        const model = models.get(item.key)!;
+        if (model.type === "draft") return this.renderDraft(list, file);
+        if (model.type === "empty") {
+          return list.createDiv({
+            text: "No comments or suggestions in this file.",
+            cls: "tc-empty",
+          });
+        }
+        if (model.type === "section") {
+          return list.createDiv({ text: model.title, cls: "tc-section" });
+        }
+        return this.renderComment(list, file, model.r);
+      },
+      rebuild
+    );
+
+    this.applyFocus(container);
+    this.revealThreadEnd(container);
+    this.refreshTimestamps();
+    list.scrollTop = prevScroll;
   }
 
-  private renderDraft(container: HTMLElement, file: TFile): void {
+  /**
+   * Header and list are siblings so other chrome (e.g. a bottom dock) can live
+   * on `contentEl` without being patched as a card.
+   */
+  private ensureListChrome(container: HTMLElement, file: TFile): { header: HTMLElement; list: HTMLElement } {
+    let header = container.querySelector<HTMLElement>(".tc-header");
+    let list = container.querySelector<HTMLElement>(".tc-sidebar-list");
+    if (!header || header.dataset.tcFile !== file.path) {
+      container.empty();
+      header = container.createDiv({ cls: "tc-header" });
+      header.dataset.tcFile = file.path;
+      header.createSpan({ text: "Comments", cls: "tc-title" });
+      const toggle = header.createEl("button", {
+        text: this.showResolved ? "Hide resolved" : "Show resolved",
+        cls: "tc-toggle",
+      });
+      toggle.onclick = () => this.toggleResolved();
+      const exportBtn = header.createEl("button", { text: "Export", cls: "tc-toggle" });
+      exportBtn.onclick = () => void this.plugin.exportComments(file);
+      list = container.createDiv({ cls: "tc-sidebar-list" });
+      return { header, list };
+    }
+    if (!list) list = container.createDiv({ cls: "tc-sidebar-list" });
+    const toggle = header.querySelector<HTMLButtonElement>("button.tc-toggle");
+    if (toggle) toggle.setText(this.showResolved ? "Hide resolved" : "Show resolved");
+    return { header, list };
+  }
+
+  private applyFocus(container: HTMLElement): void {
+    if (!this.focusedId) return;
+    for (const el of Array.from(container.querySelectorAll(".tc-focused"))) el.removeClass("tc-focused");
+    container.querySelector<HTMLElement>(`[data-tc-key="card:${this.focusedId}"]`)?.addClass("tc-focused");
+    this.focusedId = null;
+  }
+
+  private revealThreadEnd(container: HTMLElement): void {
+    const id = this.revealThreadEndId;
+    if (!id) return;
+    this.revealThreadEndId = null;
+    const card = container.querySelector<HTMLElement>(`[data-tc-key="card:${id}"]`);
+    if (!card) return;
+    window.setTimeout(() => {
+      const latest =
+        card.querySelector<HTMLElement>(".tc-entry:last-child") ??
+        card.querySelector<HTMLElement>(".tc-reply") ??
+        card;
+      latest.scrollIntoView({ block: "nearest" });
+    }, 0);
+  }
+
+  private renderDraft(container: HTMLElement, file: TFile): HTMLElement {
     const draft = this.draft;
-    if (!draft) return;
+    if (!draft) return container.createDiv({ cls: "tc-card tc-draft" });
     const card = container.createDiv({ cls: "tc-card tc-draft" });
     card.createDiv({ text: `"${truncate(draft.anchor.exact, 80)}"`, cls: "tc-quote" });
     if (draft.kind === "suggestion") {
       this.renderSuggestionDraft(card, file, draft);
-      return;
+      return card;
     }
     const input = card.createEl("textarea", {
       cls: "tc-input",
@@ -274,6 +383,7 @@ export class CommentSidebar extends ItemView implements HoverParent {
           });
       }
     };
+    return card;
   }
 
   private renderSuggestionDraft(card: HTMLElement, file: TFile, draft: Draft): void {
@@ -349,7 +459,7 @@ export class CommentSidebar extends ItemView implements HoverParent {
     window.setTimeout(() => replacement.focus(), 0);
   }
 
-  private renderComment(container: HTMLElement, file: TFile, r: ResolvedComment): void {
+  private renderComment(container: HTMLElement, file: TFile, r: ResolvedComment): HTMLElement {
     const cls = ["tc-card"];
     if (r.comment.status === "resolved") cls.push("tc-resolved");
     if (
@@ -448,12 +558,6 @@ export class CommentSidebar extends ItemView implements HoverParent {
           );
         });
     };
-    if (r.id === this.focusedId) {
-      card.addClass("tc-focused");
-      window.setTimeout(() => card.scrollIntoView({ block: "nearest" }), 0);
-      this.focusedId = null;
-    }
-
     if (r.comment.suggestion) {
       const suggestion = r.comment.suggestion;
       const replacement =
@@ -537,8 +641,12 @@ export class CommentSidebar extends ItemView implements HoverParent {
       }
     }
 
+    // Thread body → reply composer → actions. Keeping the composer directly under
+    // the latest entry avoids Resolve/Copy/Delete sitting between the conversation
+    // and the input (which scrolled the latest message out of view under the reply box).
+    const thread = card.createDiv({ cls: "tc-thread" });
     for (const [entryIndex, entry] of r.comment.thread.entries()) {
-      const row = card.createDiv({ cls: "tc-entry" });
+      const row = thread.createDiv({ cls: "tc-entry" });
       const meta = row.createDiv({ cls: "tc-meta" });
       paintAuthor(
         meta.createSpan({ text: entry.author, cls: "tc-author" }),
@@ -648,6 +756,8 @@ export class CommentSidebar extends ItemView implements HoverParent {
       };
     }
 
+    this.renderReplyComposer(card, file, r);
+
     const actions = card.createDiv({ cls: "tc-actions" });
     if (r.comment.status === "open" && r.comment.suggestion && !r.comment.suggestion.result) {
       const canAccept =
@@ -698,29 +808,39 @@ export class CommentSidebar extends ItemView implements HoverParent {
       reBtn.onclick = () => this.reanchorFromSelection(file, r.id);
     }
     if (!actions.hasChildNodes()) actions.remove();
-    if (r.comment.status === "open") {
-      const reply = card.createEl("textarea", {
-        cls: "tc-input",
-        attr: {
-          placeholder:
-            this.plugin.settings.submitShortcut === "enter"
-              ? "Reply… (Enter = send)"
-              : "Reply… (Cmd/Ctrl+Enter = send)",
-          rows: "2",
-        },
-      });
-      reply.onkeydown = (e) => {
-        if (this.shouldSubmit(e)) {
-          e.preventDefault();
-          const text = reply.value.trim();
-          if (!text) return;
-          reply.value = "";
-          void this.plugin.updateDoc(file, (d) =>
+    return card;
+  }
+
+  private renderReplyComposer(card: HTMLElement, file: TFile, r: ResolvedComment): void {
+    if (r.comment.status !== "open") return;
+    const replyWrap = card.createDiv({ cls: "tc-reply" });
+    const reply = replyWrap.createEl("textarea", {
+      cls: "tc-input tc-reply-input",
+      attr: {
+        placeholder:
+          this.plugin.settings.submitShortcut === "enter"
+            ? "Reply… (Enter = send)"
+            : "Reply… (Cmd/Ctrl+Enter = send)",
+        rows: "2",
+        "aria-label": "Reply to thread",
+      },
+    });
+    reply.onkeydown = (e) => {
+      if (this.shouldSubmit(e)) {
+        e.preventDefault();
+        const text = reply.value.trim();
+        if (!text) return;
+        reply.value = "";
+        this.revealThreadEndId = r.id;
+        void this.plugin
+          .updateDoc(file, (d) =>
             addReply(d.comments, r.id, this.plugin.currentAuthor(), this.plugin.nowTs(), text)
-          );
-        }
-      };
-    }
+          )
+          .then((ok) => {
+            if (ok) void this.render();
+          });
+      }
+    };
   }
 
   private shouldSubmit(event: KeyboardEvent): boolean {

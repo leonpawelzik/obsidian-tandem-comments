@@ -1,6 +1,14 @@
-import { Annotation, RangeSetBuilder, Transaction } from "@codemirror/state";
+import { Annotation, RangeSetBuilder, Transaction, type ChangeSet } from "@codemirror/state";
 import { Decoration, DecorationSet, EditorView, ViewPlugin, ViewUpdate } from "@codemirror/view";
 import type CommentsPlugin from "./main";
+import {
+  recordDecorationMap,
+  recordDecorationRebuild,
+  recordParse,
+  recordPersist,
+  recordTable,
+  recordUpdate,
+} from "./perf";
 import {
   changesTouchCommentBlock,
   isFullReplace,
@@ -9,23 +17,36 @@ import {
   shouldPreservePendingAnchors,
   type TrackedAnchor,
 } from "./reanchor";
-import { makeAnchor, normalizeTrailingChanges, parseDocument, resolveAnchor, serializeDocument } from "./store";
-import { applyTableHighlights, rangesTouchTable } from "./table-highlight";
+import {
+  FENCE_OPEN,
+  anchorStillAt,
+  fenceStartsAt,
+  makeAnchor,
+  matchPositionsByExact,
+  normalizeTrailingChanges,
+  parseDocument,
+  proseEndOf,
+  proseEndOfText,
+  resolutionFromMatches,
+  serializeDocument,
+  type TextSlice,
+} from "./store";
+import { applyTableHighlights, clearTableHighlights, findTables, rangesTouchTable } from "./table-highlight";
 
 /** Markiert Transaktionen, die das Plugin selbst dispatcht (Block-Rewrite). */
 export const selfEdit = Annotation.define<boolean>();
 
-const REANCHOR_DEBOUNCE_MS = 800;
-const NORMALIZE_DEBOUNCE_MS = 500;
+/** L2 persist: reanchor + trailing normalize in one debounced dispatch. */
+const PERSIST_DEBOUNCE_MS = 800;
 
 export interface EditorExtensionHost {
-  settings: { schemaHint: boolean };
+  settings: { schemaHint: boolean; debugPerf?: boolean };
   isApplyingSuggestion(): boolean;
   openSidebar(id?: string): unknown;
 }
 
 function isObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
+  return typeof value === "object" && value !== null;
 }
 
 function isOpenSuggestion(value: unknown): boolean {
@@ -47,6 +68,8 @@ function isAcceptedSuggestion(value: unknown): boolean {
  */
 export function isSuggestionAcceptanceHistoryUpdate(u: ViewUpdate, oldText: string, text: string): boolean {
   if (!u.transactions.some((tr) => tr.isUserEvent("undo") || tr.isUserEvent("redo"))) return false;
+  recordParse();
+  recordParse();
   const oldDoc = parseDocument(oldText);
   const newDoc = parseDocument(text);
   if (oldDoc.error || newDoc.error || oldDoc.prose === newDoc.prose) return false;
@@ -64,54 +87,143 @@ export function isSuggestionAcceptanceHistoryUpdate(u: ViewUpdate, oldText: stri
   return false;
 }
 
+function insertedContains(changes: ChangeSet, needle: string): boolean {
+  let hit = false;
+  changes.iterChanges((_fromA, _toA, _fromB, _toB, inserted) => {
+    if (!hit && inserted.toString().includes(needle)) hit = true;
+  });
+  return hit;
+}
+
+/** Cheap window around each change — used only when this note has no tandem fence yet. */
+function changeWindowLooksLikeFence(doc: TextSlice, changes: ChangeSet): boolean {
+  const pad = FENCE_OPEN.length + 8;
+  let found = false;
+  changes.iterChangedRanges((_fromA, _toA, fromB, toB) => {
+    if (found) return;
+    const from = Math.max(0, fromB - pad);
+    const to = Math.min(doc.length, toB + pad);
+    const slice = doc.sliceString(from, to);
+    if (slice.includes(FENCE_OPEN) || slice.includes("```")) found = true;
+  });
+  return found;
+}
+
 function editorAnchorTrackerClass(plugin: EditorExtensionHost) {
   return (
     class {
       decorations: DecorationSet;
       anchors: TrackedAnchor[] = [];
       dirty = false;
-      timer: number | null = null;
-      normalizeTimer: number | null = null;
+      persistTimer: number | null = null;
+      /** Exclusive prose end / fence start. Mapped through typing; verified, not re-scanned. */
+      proseEnd = 0;
+      hasBlock = false;
+      /**
+       * Sticky table presence for the current doc generation.
+       * null = unknown (rescan on next table work); false = skip DOM path;
+       * true = selection/viewport may refresh table highlights.
+       */
+      hasTables: boolean | null = null;
 
       constructor(readonly view: EditorView) {
         this.syncFromDoc(view.state.doc.toString());
         this.decorations = this.buildDecorations();
         this.scheduleTableHighlight();
-        this.scheduleNormalize();
+        this.schedulePersist();
       }
 
       destroy(): void {
-        if (this.timer !== null) window.clearTimeout(this.timer);
-        if (this.normalizeTimer !== null) window.clearTimeout(this.normalizeTimer);
+        if (this.persistTimer !== null) window.clearTimeout(this.persistTimer);
+      }
+
+      private captureFence(doc: TextSlice, knownProseEnd?: number): void {
+        this.proseEnd = knownProseEnd ?? proseEndOfText(doc);
+        this.hasBlock = fenceStartsAt(doc, this.proseEnd);
+      }
+
+      /** Map the cached fence through this transaction; rescan only when the mapping is stale. */
+      private mapProseEnd(u: ViewUpdate): number {
+        const doc = u.state.doc;
+        if (!this.hasBlock) {
+          if (!changeWindowLooksLikeFence(doc, u.changes)) return doc.length;
+          return proseEndOfText(doc);
+        }
+        const mapped = u.changes.mapPos(this.proseEnd, 1);
+        if (fenceStartsAt(doc, mapped)) return mapped;
+        return proseEndOfText(doc);
       }
 
       syncFromDoc(text: string): void {
+        recordParse();
         const doc = parseDocument(text);
         this.anchors = [];
         this.dirty = false;
-        if (doc.error) return;
-        for (const [id, c] of Object.entries(doc.comments)) {
-          if (c.status === "resolved") continue;
-          const r = resolveAnchor(doc.prose, c.anchor);
+        if (doc.error) {
+          this.hasTables = null;
+          this.captureFence(this.view.state.doc);
+          return;
+        }
+        this.proseEnd = doc.prose.length;
+        this.hasBlock = fenceStartsAt(this.view.state.doc, this.proseEnd);
+        const open = Object.entries(doc.comments).filter(([, c]) => c.status !== "resolved");
+        const matches = matchPositionsByExact(
+          doc.prose,
+          open.map(([, c]) => c.anchor.exact)
+        );
+        for (const [id, c] of open) {
+          const r = resolutionFromMatches(doc.prose, c.anchor, matches.get(c.anchor.exact) ?? []);
           if (r.kind === "resolved") this.anchors.push({ id, from: r.start, to: r.end });
         }
         this.anchors.sort((a, b) => a.from - b.from);
+        this.hasTables = this.anchors.length === 0 ? false : findTables(text, doc.prose.length).length > 0;
+      }
+
+      /** Table DOM work only when anchors exist and we have not proven absence of tables. */
+      private shouldRefreshTableHighlights(reason: "doc" | "selection"): boolean {
+        if (this.anchors.length === 0) return false;
+        if (this.hasTables === false) return false;
+        if (reason === "selection" && this.hasTables !== true) return false;
+        return true;
+      }
+
+      private rebuildDecorations(): void {
+        this.decorations = this.buildDecorations();
+        recordDecorationRebuild();
+      }
+
+      /** Map existing marks through the transaction when only positions moved (same id set). */
+      private mapDecorations(u: ViewUpdate): void {
+        this.decorations = this.decorations.map(u.changes);
+        recordDecorationMap();
       }
 
       update(u: ViewUpdate): void {
-        // Tabellen-Widgets entstehen/verschwinden auch bei Selektions- und
-        // Viewport-Wechseln (Cursor rein/raus), nicht nur bei Doc-Änderungen.
-        if (u.docChanged || u.selectionSet || u.viewportChanged) this.scheduleTableHighlight();
-        if (!u.docChanged) return;
-        this.scheduleNormalize();
-        const text = u.state.doc.toString();
+        if (!u.docChanged) {
+          if (
+            (u.selectionSet || u.viewportChanged) &&
+            this.shouldRefreshTableHighlights("selection")
+          ) {
+            this.scheduleTableHighlight();
+          }
+          return;
+        }
+
+        const t0 = performance.now();
+        this.schedulePersist();
+
+        const oldProseLen = this.proseEnd;
+        const newProseLen = this.mapProseEnd(u);
+        this.proseEnd = newProseLen;
+        this.hasBlock = fenceStartsAt(u.state.doc, newProseLen);
+
         const isSelf = u.transactions.some((tr) => tr.annotation(selfEdit));
-        const oldText = u.startState.doc.toString();
-        const oldProseLen = parseDocument(oldText).prose.length;
-        const newProseLen = parseDocument(text).prose.length;
         const fullReplace = isFullReplace(u.changes);
         const touchesBlock = changesTouchCommentBlock(u.changes, oldProseLen, newProseLen);
-        const acceptanceHistory = isSuggestionAcceptanceHistoryUpdate(u, oldText, text);
+        const isHistory = u.transactions.some((tr) => tr.isUserEvent("undo") || tr.isUserEvent("redo"));
+        const acceptanceHistory = isHistory
+          ? isSuggestionAcceptanceHistoryUpdate(u, u.startState.doc.toString(), u.state.doc.toString())
+          : false;
         const preservePending = shouldPreservePendingAnchors(
           u.changes,
           oldProseLen,
@@ -121,17 +233,28 @@ function editorAnchorTrackerClass(plugin: EditorExtensionHost) {
           (this.dirty || acceptanceHistory) && touchesBlock && preservePending
             ? mapAnchors(this.anchors, u.changes).filter((anchor) => anchor.to <= newProseLen)
             : [];
+
+        /** true → decorations rebuilt from anchors; false → mapped through changes. */
+        let rebuildDeco = true;
+
         if (isSelf || fullReplace || touchesBlock) {
+          const text = u.state.doc.toString();
           this.syncFromDoc(text);
           if (pending.length > 0) {
+            recordParse();
             const doc = parseDocument(text);
             if (!doc.error) {
+              const open = Object.entries(doc.comments).filter(([, comment]) => comment.status === "open");
+              const matches = matchPositionsByExact(
+                doc.prose,
+                open.map(([, comment]) => comment.anchor.exact)
+              );
               const recoverable = new Set(
-                Object.entries(doc.comments)
+                open
                   .filter(
                     ([, comment]) =>
-                      comment.status === "open" &&
-                      resolveAnchor(doc.prose, comment.anchor).kind === "orphaned"
+                      resolutionFromMatches(doc.prose, comment.anchor, matches.get(comment.anchor.exact) ?? [])
+                        .kind === "orphaned"
                   )
                   .map(([id]) => id)
               );
@@ -139,40 +262,62 @@ function editorAnchorTrackerClass(plugin: EditorExtensionHost) {
               if (merged.length > this.anchors.length) {
                 this.anchors = merged;
                 this.dirty = true;
-                this.scheduleReanchor();
+                this.schedulePersist();
               }
             }
           }
         } else {
+          if (this.hasTables === false && insertedContains(u.changes, "|")) this.hasTables = null;
           const ranges: { from: number; to: number }[] = [];
           u.changes.iterChangedRanges((_fromA, _toA, fromB, toB) => {
             ranges.push({ from: fromB, to: toB });
           });
-          if (rangesTouchTable(text, newProseLen, ranges)) {
-            // Tabellen-Edit: Positionen durch die Änderung mappen (Anker folgen
-            // echten Text-Edits wie in Prosa). Anker, die bei Obsidians Tabellen-
-            // Neuformatierung (Ganz-Block-Replace) kollabieren, per exaktem Text
-            // wiederherstellen statt sie zu verlieren. performReanchor schreibt nur
-            // um, wenn der exact-Text wirklich weg ist — schützt vor Korruption.
+          const needTableCheck = this.hasTables !== false && this.anchors.length > 0;
+          const text = needTableCheck ? u.state.doc.toString() : "";
+          const touchTable = needTableCheck && rangesTouchTable(text, newProseLen, ranges);
+          if (touchTable) {
+            this.hasTables = true;
             const mapped = mapAnchors(this.anchors, u.changes);
             const survived = new Set(mapped.map((a) => a.id));
             this.anchors = mapped;
+            recordParse();
             const doc = parseDocument(text);
-            for (const [id, c] of Object.entries(doc.comments)) {
-              if (c.status === "resolved" || survived.has(id)) continue;
-              const r = resolveAnchor(doc.prose, c.anchor);
+            const rest = Object.entries(doc.comments).filter(
+              ([id, c]) => c.status !== "resolved" && !survived.has(id)
+            );
+            const matches = matchPositionsByExact(
+              doc.prose,
+              rest.map(([, c]) => c.anchor.exact)
+            );
+            for (const [id, c] of rest) {
+              const r = resolutionFromMatches(doc.prose, c.anchor, matches.get(c.anchor.exact) ?? []);
               if (r.kind === "resolved") this.anchors.push({ id, from: r.start, to: r.end });
             }
             this.anchors.sort((a, b) => a.from - b.from);
             this.dirty = true;
-            this.scheduleReanchor();
+            this.schedulePersist();
           } else {
+            // Pure prose map: same id set, positions follow ChangeSet — map marks in place.
             this.anchors = mapAnchors(this.anchors, u.changes);
             this.dirty = true;
-            this.scheduleReanchor();
+            this.schedulePersist();
+            this.mapDecorations(u);
+            rebuildDeco = false;
           }
         }
-        this.decorations = this.buildDecorations();
+
+        if (rebuildDeco) this.rebuildDecorations();
+
+        if (this.shouldRefreshTableHighlights("doc")) this.scheduleTableHighlight();
+        else if (this.anchors.length === 0) {
+          this.view.requestMeasure({
+            key: "tc-table-highlight",
+            read: () => null,
+            write: () => clearTableHighlights(this.view),
+          });
+        }
+
+        recordUpdate(performance.now() - t0);
       }
 
       buildDecorations(): DecorationSet {
@@ -187,95 +332,129 @@ function editorAnchorTrackerClass(plugin: EditorExtensionHost) {
 
       /**
        * Highlights innerhalb gerenderter Tabellen-Widgets müssen direkt ins DOM
-       * geschrieben werden (CM-mark-Dekorationen werden dort verschluckt). Das
-       * läuft in der Measure-/Write-Phase, nachdem Obsidian die Widgets gebaut hat.
+       * geschrieben werden (CM-mark-Dekorationen werden dort verschluckt).
        */
       scheduleTableHighlight(): void {
         this.view.requestMeasure({
           key: "tc-table-highlight",
           read: () => null,
           write: () => {
+            const t0 = performance.now();
+            if (this.anchors.length === 0) {
+              clearTableHighlights(this.view);
+              recordTable(performance.now() - t0);
+              return;
+            }
             const text = this.view.state.doc.toString();
-            const proseLen = parseDocument(text).prose.length;
+            const proseLen = proseEndOf(text);
+            if (this.hasTables !== true) {
+              const tables = findTables(text, proseLen);
+              this.hasTables = tables.length > 0;
+              if (!this.hasTables) {
+                clearTableHighlights(this.view);
+                recordTable(performance.now() - t0);
+                return;
+              }
+            }
             applyTableHighlights(this.view, this.anchors, text, proseLen, (id) => void plugin.openSidebar(id));
+            recordTable(performance.now() - t0);
           },
         });
       }
 
-      scheduleNormalize(): void {
-        if (this.normalizeTimer !== null) window.clearTimeout(this.normalizeTimer);
-        this.normalizeTimer = window.setTimeout(() => {
-          this.normalizeTimer = null;
-          this.performNormalize();
-        }, NORMALIZE_DEBOUNCE_MS);
+      schedulePersist(): void {
+        if (this.persistTimer !== null) window.clearTimeout(this.persistTimer);
+        this.persistTimer = window.setTimeout(() => {
+          this.persistTimer = null;
+          this.performPersist();
+        }, PERSIST_DEBOUNCE_MS);
       }
 
       /**
-       * Faltet Inhalt hinter dem Block (getippte Prosa, Fußnoten-Definitionen)
-       * zurück vor den Block, damit der Block das letzte Element der Datei bleibt —
-       * sonst landet der Text im nicht kommentierbaren trailing-Bereich.
+       * L2: rewrite stale quote anchors and fold trailing content back before the
+       * fence in a single selfEdit transaction (reanchor + normalize coalesced).
        */
-      performNormalize(): void {
-        // Ausstehendes Reanchor zuerst verarbeiten: syncFromDoc (via update()) baut
-        // die Anker sonst aus dem noch nicht umgeschriebenen Block neu auf und der
-        // gerade bearbeitete Anker geht verloren, das spätere Reanchor no-opt dann.
-        if (this.dirty) this.performReanchor();
-        const text = this.view.state.doc.toString();
-        const changes = normalizeTrailingChanges(text, parseDocument(text));
-        if (!changes) return;
+      performPersist(): void {
+        const t0 = performance.now();
+        const original = this.view.state.doc.toString();
+        let text = original;
+        recordParse();
+        let doc = parseDocument(text);
+        if (doc.error) {
+          this.dirty = false;
+          recordPersist(performance.now() - t0);
+          return;
+        }
+
+        let blockChanged = false;
+        if (this.dirty) {
+          this.dirty = false;
+          if (Object.keys(doc.comments).length > 0) {
+            const needSearch: TrackedAnchor[] = [];
+            for (const t of this.anchors) {
+              const c = doc.comments[t.id];
+              if (!c || c.status === "resolved" || t.to > doc.prose.length) continue;
+              if (anchorStillAt(doc.prose, t.from, t.to, c.anchor.exact)) continue;
+              needSearch.push(t);
+            }
+            const matches =
+              needSearch.length === 0
+                ? null
+                : matchPositionsByExact(
+                    doc.prose,
+                    needSearch.map((t) => doc.comments[t.id].anchor.exact)
+                  );
+            for (const t of needSearch) {
+              const c = doc.comments[t.id];
+              const cur = c.anchor;
+              if (
+                resolutionFromMatches(doc.prose, cur, matches!.get(cur.exact) ?? []).kind === "resolved"
+              ) {
+                continue;
+              }
+              const next = makeAnchor(doc.prose, t.from, t.to);
+              if (
+                next.exact &&
+                (next.exact !== cur.exact ||
+                  next.prefix !== cur.prefix ||
+                  next.suffix !== cur.suffix ||
+                  next.pos !== cur.pos)
+              ) {
+                c.anchor = next;
+                blockChanged = true;
+              }
+            }
+          }
+        }
+
+        if (blockChanged) {
+          text = serializeDocument(doc, plugin.settings.schemaHint);
+          recordParse();
+          doc = parseDocument(text);
+        }
+
+        const norm = normalizeTrailingChanges(text, doc);
+        if (!blockChanged && !norm) {
+          recordPersist(performance.now() - t0);
+          return;
+        }
+
+        const changes: { from: number; to: number; insert: string }[] = [];
+        if (blockChanged) {
+          const proseLen = proseEndOf(original);
+          changes.push({
+            from: proseLen,
+            to: original.length,
+            insert: text.slice(proseEndOf(text)),
+          });
+        }
+        if (norm) changes.push(...norm);
+
         this.view.dispatch({
           changes,
           annotations: [selfEdit.of(true), Transaction.addToHistory.of(false)],
         });
-      }
-
-      scheduleReanchor(): void {
-        if (this.timer !== null) window.clearTimeout(this.timer);
-        this.timer = window.setTimeout(() => {
-          this.timer = null;
-          this.performReanchor();
-        }, REANCHOR_DEBOUNCE_MS);
-      }
-
-      /**
-       * Schreibt nach editierter Prosa die aktuellen Zitate/Kontexte der noch
-       * lebenden Anker zurück in den Block (nur die Block-Region wird ersetzt).
-       */
-      performReanchor(): void {
-        if (!this.dirty) return;
-        this.dirty = false;
-        const text = this.view.state.doc.toString();
-        const doc = parseDocument(text);
-        if (doc.error || Object.keys(doc.comments).length === 0) return;
-        let changed = false;
-        for (const t of this.anchors) {
-          const c = doc.comments[t.id];
-          if (!c || c.status === "resolved") continue;
-          if (t.to > doc.prose.length) continue;
-          const cur = c.anchor;
-          // Nur umschreiben, wenn der bisherige exact-Text nicht mehr auffindbar
-          // ist (= echte Bearbeitung des Zitats). Ist er noch da, war die Änderung
-          // nur drumherum (z.B. Obsidians Tabellen-Neuformatierung) — ein Rewrite
-          // aus evtl. verschobenen Positionen würde den Anker korrumpieren.
-          if (resolveAnchor(doc.prose, cur).kind === "resolved") continue;
-          const next = makeAnchor(doc.prose, t.from, t.to);
-          if (
-            next.exact &&
-            (next.exact !== cur.exact ||
-              next.prefix !== cur.prefix ||
-              next.suffix !== cur.suffix ||
-              next.pos !== cur.pos)
-          ) {
-            c.anchor = next;
-            changed = true;
-          }
-        }
-        if (!changed) return;
-        const serialized = serializeDocument(doc, plugin.settings.schemaHint);
-        this.view.dispatch({
-          changes: { from: doc.prose.length, to: text.length, insert: serialized.slice(doc.prose.length) },
-          annotations: [selfEdit.of(true), Transaction.addToHistory.of(false)],
-        });
+        recordPersist(performance.now() - t0);
       }
     }
   );

@@ -1,10 +1,11 @@
-import { EditorState, Transaction, type TransactionSpec } from "@codemirror/state";
+import { EditorState, Text, Transaction, type TransactionSpec } from "@codemirror/state";
 import type { EditorView, ViewUpdate } from "@codemirror/view";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   createEditorAnchorTracker,
   type EditorExtensionHost,
 } from "../src/editor-extension";
+import { getPerfSnapshot, resetPerf, setPerfEnabled } from "../src/perf";
 import { isFullReplace } from "../src/reanchor";
 import {
   makeAnchor,
@@ -195,6 +196,53 @@ describe("editor-extension pending anchors across acceptance history", () => {
     const replacement = "Entirely unrelated external document.";
     harness.apply({ changes: { from: 0, to: harness.text().length, insert: replacement } });
     expect(harness.tracker.anchors).toEqual([]);
+    harness.tracker.destroy();
+  });
+});
+
+describe("editor-extension keystroke path", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.stubGlobal("window", {
+      setTimeout: globalThis.setTimeout.bind(globalThis),
+      clearTimeout: globalThis.clearTimeout.bind(globalThis),
+    });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+    setPerfEnabled(false);
+    resetPerf();
+  });
+
+  it("does not flatten the note or parse JSON while typing in prose", () => {
+    const harness = new ExtensionHarness(serializeDocument(acceptanceDoc(), true));
+    setPerfEnabled(true);
+    resetPerf();
+    const from = harness.text().indexOf("and");
+    const spy = vi.spyOn(Text.prototype, "toString");
+    harness.apply({ changes: { from, to: from, insert: " also" }, userEvent: "input" });
+    const flattened = spy.mock.results.filter(
+      (result) => typeof result.value === "string" && result.value.includes("```tandem-comments")
+    );
+    expect(flattened).toEqual([]);
+    expect(getPerfSnapshot().parses).toBe(0);
+    expect(getPerfSnapshot().decorationMaps).toBe(1);
+    expect(getPerfSnapshot().decorationRebuilds).toBe(0);
+    spy.mockRestore();
+    harness.tracker.destroy();
+  });
+
+  it("maps the cached fence through typing instead of scanning the file", () => {
+    const harness = new ExtensionHarness(serializeDocument(acceptanceDoc(), true));
+    const before = harness.tracker.proseEnd;
+    harness.apply({
+      changes: { from: 0, to: 0, insert: "Prefix " },
+      userEvent: "input",
+    });
+    expect(harness.tracker.proseEnd).toBe(before + "Prefix ".length);
+    expect(harness.tracker.hasBlock).toBe(true);
     harness.tracker.destroy();
   });
 });

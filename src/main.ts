@@ -23,6 +23,7 @@ import {
   settingsEffects,
 } from "./settings-model";
 import { CommentSidebar, VIEW_TYPE_COMMENTS } from "./sidebar";
+import { formatPerfSnapshot, resetPerf, setPerfEnabled } from "./perf";
 import { commitSuggestionAcceptance } from "./suggestion-editor";
 import {
   type SuggestionAcceptancePlan,
@@ -98,6 +99,29 @@ export default class CommentsPlugin extends Plugin {
         void this.exportComments(file);
       },
     });
+    this.addCommand({
+      id: "show-perf-counters",
+      name: "Show performance counters",
+      icon: "gauge",
+      callback: () => {
+        if (!this.settings.debugPerf) {
+          new Notice("Enable “Debug performance counters” in Tandem Comments settings first.");
+          return;
+        }
+        const line = formatPerfSnapshot();
+        console.info("[tandem-perf]", line);
+        new Notice(line, 8000);
+      },
+    });
+    this.addCommand({
+      id: "reset-perf-counters",
+      name: "Reset performance counters",
+      icon: "rotate-ccw",
+      callback: () => {
+        resetPerf();
+        new Notice(this.settings.debugPerf ? "Performance counters reset." : "Counters cleared (debug is off).");
+      },
+    });
 
     this.registerEvent(
       this.app.workspace.on("editor-menu", (menu, editor) => {
@@ -137,6 +161,7 @@ export default class CommentsPlugin extends Plugin {
     const parsed = parseCommentsSettings(await this.loadData());
     this.migrateLegacyAuthorName(parsed.legacyAuthorName);
     this.settings = parsed.settings;
+    setPerfEnabled(!!this.settings.debugPerf);
     if (parsed.changed) await this.saveData(this.settings);
   }
 
@@ -144,6 +169,8 @@ export default class CommentsPlugin extends Plugin {
     const previous = this.settings;
     const next = parseCommentsSettings({ ...previous, ...patch }).settings;
     this.settings = next;
+    setPerfEnabled(!!next.debugPerf);
+    if (next.debugPerf && !previous.debugPerf) resetPerf();
     const write = this.settingsWriteQueue
       .catch(() => undefined)
       .then(() => this.saveData(next));
@@ -268,13 +295,23 @@ export default class CommentsPlugin extends Plugin {
     return new Date().toISOString();
   }
 
+  /**
+   * Prefer the live editor buffer when the file is open (L2/L3 reads stay off disk).
+   * Falls back to vault.read when no markdown editor holds the file.
+   */
+  async readFileText(file: TFile): Promise<string> {
+    const editor = this.editorForFile(file);
+    if (editor) return editor.getValue();
+    return this.app.vault.read(file);
+  }
+
   async readDoc(file: TFile): Promise<ParsedDoc> {
-    return parseDocument(await this.app.vault.read(file));
+    return parseDocument(await this.readFileText(file));
   }
 
   /** Alle Mutationen laufen hierdurch: read → parse → mutate → serialize → write. */
   async updateDoc(file: TFile, mutate: (doc: ParsedDoc) => void): Promise<boolean> {
-    const raw = await this.app.vault.read(file);
+    const raw = await this.readFileText(file);
     const doc = parseDocument(raw);
     if (doc.error) {
       new Notice("tandem-comments block is invalid — please fix the JSON: " + doc.error);
@@ -282,7 +319,22 @@ export default class CommentsPlugin extends Plugin {
     }
     mutate(doc);
     const out = serializeDocument(doc, this.settings.schemaHint);
-    if (out !== raw) await this.app.vault.modify(file, out);
+    if (out !== raw) {
+      // Align any open editor buffer before vault.modify so a sidebar re-render
+      // that races the external-change round-trip still sees the new thread entry
+      // (otherwise the latest reply can vanish while the reply field remains).
+      const editor = this.editorForFile(file);
+      if (editor && editor.getValue() !== out) {
+        const cursor = editor.getCursor();
+        editor.setValue(out);
+        try {
+          editor.setCursor(cursor);
+        } catch {
+          /* cursor may be past EOF if the file shrank */
+        }
+      }
+      await this.app.vault.modify(file, out);
+    }
     return true;
   }
 
