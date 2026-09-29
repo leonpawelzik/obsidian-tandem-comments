@@ -134,6 +134,26 @@ function contextMatches(prose: string, at: number, len: number, anchor: Anchor):
 export function resolveAnchor(prose: string, anchor: Anchor): AnchorResolution {
   const exact = anchor.exact;
   if (!exact) return { kind: "orphaned" };
+  // Search the more selective context first. A contextual hit is exactly a hit
+  // that contextMatches would retain; uniqueness still has to be checked.
+  // Missing/stale context falls back to the original quote-only semantics.
+  if (anchor.prefix || anchor.suffix) {
+    const context = (anchor.prefix ?? "") + exact + (anchor.suffix ?? "");
+    let at = prose.indexOf(context);
+    if (at !== -1) {
+      let best = at + (anchor.prefix?.length ?? 0);
+      let count = 0;
+      while (at !== -1) {
+        const position = at + (anchor.prefix?.length ?? 0);
+        count++;
+        if (anchor.pos != null && Math.abs(position - anchor.pos) < Math.abs(best - anchor.pos)) best = position;
+        at = prose.indexOf(context, at + 1);
+      }
+      return count === 1
+        ? { kind: "resolved", start: best, end: best + exact.length }
+        : { kind: "resolved", start: best, end: best + exact.length, ambiguous: true };
+    }
+  }
   const matches: number[] = [];
   let i = prose.indexOf(exact);
   while (i !== -1) {
@@ -410,4 +430,25 @@ export function resolveAll(prose: string, comments: CommentMap): ResolvedComment
       resolution: acceptedHistory ? { kind: "orphaned" } : resolveAnchor(prose, comment.anchor),
     };
   });
+}
+
+// Read-only, tracker-local cache. Mutations must still use parseDocument().
+export function createDocumentReader(): (raw: string) => ParsedDoc {
+  let body: string | undefined;
+  let comments: CommentMap = {};
+  return (raw) => {
+    const block = findBlock(raw);
+    if (!block) return { prose: raw, comments: {} };
+    if (block.body !== body) {
+      try {
+        comments = parseBlockBody(block.body);
+        body = block.body;
+      } catch {
+        return parseDocument(raw);
+      }
+    }
+    const doc: ParsedDoc = { prose: raw.slice(0, block.proseEnd), comments };
+    if (block.trailing) doc.trailing = block.trailing;
+    return doc;
+  };
 }

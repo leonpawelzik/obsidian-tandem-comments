@@ -1,4 +1,6 @@
-import { Editor, MarkdownView, Notice, normalizePath, Plugin, TFile } from "obsidian";
+import type { EditorView } from "@codemirror/view";
+import { PendingAnchorSaves } from "./pending-anchor-saves";
+import { editorInfoField, Editor, MarkdownView, Notice, normalizePath, Plugin, TFile } from "obsidian";
 import {
   AUTHOR_OVERRIDE_KEY,
   detectOsUsername,
@@ -7,7 +9,7 @@ import {
   resolveAuthorName,
 } from "./author";
 import { confirmAction } from "./confirm-action";
-import { buildEditorExtension } from "./editor-extension";
+import { buildEditorExtension, type AnchorSaveTarget } from "./editor-extension";
 import {
   buildExportNote,
   formatTs,
@@ -38,10 +40,26 @@ import type { Anchor, ParsedDoc } from "./types";
 export default class CommentsPlugin extends Plugin {
   settings: CommentsSettings = DEFAULT_SETTINGS;
   private applyingSuggestion = false;
+  private anchorSaves = new PendingAnchorSaves<TFile>((file, update) => this.app.vault.process(file, update));
   private settingsWriteQueue: Promise<void> = Promise.resolve();
+
+  captureAnchorSave(view: EditorView, previous?: AnchorSaveTarget): AnchorSaveTarget | undefined {
+    const file = view.state.field(editorInfoField, false)?.file;
+    if (!file) return;
+    if (previous?.key === file) return previous;
+    return { key: file, save: (before, after) => {
+      void this.anchorSaves.queue(file, before, after).catch((error) => console.error("Tandem anchor save failed", error));
+    } };
+  }
 
   async onload(): Promise<void> {
     await this.loadSettings();
+    this.registerEvent(this.app.vault.on("modify", (file) => {
+      if (file instanceof TFile) void this.anchorSaves.modified(file).catch((error) => console.error("Tandem anchor save failed", error));
+    }));
+    this.registerEvent(this.app.vault.on("delete", (file) => {
+      if (file instanceof TFile) this.anchorSaves.forget(file);
+    }));
     this.applyHighlightAppearance();
     this.applyReadingViewPreference();
 
@@ -126,6 +144,7 @@ export default class CommentsPlugin extends Plugin {
   }
 
   onunload(): void {
+    this.anchorSaves.clear();
     for (const doc of this.allDocuments()) {
       doc.body.style.removeProperty("--tc-highlight-color");
       doc.body.style.removeProperty("--tc-highlight-opacity");
