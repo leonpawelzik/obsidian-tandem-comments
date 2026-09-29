@@ -9,8 +9,8 @@ import {
   shouldPreservePendingAnchors,
   type TrackedAnchor,
 } from "./reanchor";
-import { makeAnchor, normalizeTrailingChanges, parseDocument, resolveAnchor, serializeDocument } from "./store";
-import { applyTableHighlights, rangesTouchTable } from "./table-highlight";
+import { createDocumentReader, makeAnchor, normalizeTrailingChanges, parseDocument, resolveAnchor, serializeDocument } from "./store";
+import { applyTableHighlights, clearTableHighlights, findTables, rangesTouchTable, type ParsedTable } from "./table-highlight";
 
 /** Markiert Transaktionen, die das Plugin selbst dispatcht (Block-Rewrite). */
 export const selfEdit = Annotation.define<boolean>();
@@ -18,10 +18,16 @@ export const selfEdit = Annotation.define<boolean>();
 const REANCHOR_DEBOUNCE_MS = 800;
 const NORMALIZE_DEBOUNCE_MS = 500;
 
+export interface AnchorSaveTarget {
+  key: object;
+  save(before: string, after: string): void;
+}
+
 export interface EditorExtensionHost {
   settings: { schemaHint: boolean };
   isApplyingSuggestion(): boolean;
   openSidebar(id?: string): unknown;
+  captureAnchorSave?(view: EditorView, previous?: AnchorSaveTarget): AnchorSaveTarget | undefined;
 }
 
 function isObject(value: unknown): value is Record<string, unknown> {
@@ -69,11 +75,27 @@ function editorAnchorTrackerClass(plugin: EditorExtensionHost) {
     class {
       decorations: DecorationSet;
       anchors: TrackedAnchor[] = [];
+      readDocument = createDocumentReader();
       dirty = false;
+      saveOnClose: AnchorSaveTarget | undefined;
+      destroyed = false;
       timer: number | null = null;
       normalizeTimer: number | null = null;
+      tableDoc: EditorView["state"]["doc"] | null = null;
+      tableSnapshot: { text: string; proseLen: number; tables: ParsedTable[] } | null = null;
+
+      tablesFor(text?: string, proseLen?: number) {
+        if (this.tableDoc !== this.view.state.doc || !this.tableSnapshot) {
+          const raw = text ?? this.view.state.doc.toString();
+          const length = proseLen ?? this.readDocument(raw).prose.length;
+          this.tableDoc = this.view.state.doc;
+          this.tableSnapshot = { text: raw, proseLen: length, tables: findTables(raw, length) };
+        }
+        return this.tableSnapshot;
+      }
 
       constructor(readonly view: EditorView) {
+        this.saveOnClose = plugin.captureAnchorSave?.(view);
         this.syncFromDoc(view.state.doc.toString());
         this.decorations = this.buildDecorations();
         this.scheduleTableHighlight();
@@ -81,12 +103,18 @@ function editorAnchorTrackerClass(plugin: EditorExtensionHost) {
       }
 
       destroy(): void {
+        this.destroyed = true;
+        if (this.dirty && this.saveOnClose) {
+          const before = this.view.state.doc.toString();
+          const after = this.reanchoredText(before);
+          if (after) this.saveOnClose.save(before, after);
+        }
         if (this.timer !== null) window.clearTimeout(this.timer);
         if (this.normalizeTimer !== null) window.clearTimeout(this.normalizeTimer);
       }
 
       syncFromDoc(text: string): void {
-        const doc = parseDocument(text);
+        const doc = this.readDocument(text);
         this.anchors = [];
         this.dirty = false;
         if (doc.error) return;
@@ -99,6 +127,17 @@ function editorAnchorTrackerClass(plugin: EditorExtensionHost) {
       }
 
       update(u: ViewUpdate): void {
+        const target = plugin.captureAnchorSave?.(this.view, this.saveOnClose);
+        if (target && target.key !== this.saveOnClose?.key) {
+          // Obsidian can reuse the same editor for a different file. Flush the
+          // outgoing snapshot using its original file before replacing anchors.
+          if (this.dirty && this.saveOnClose) {
+            const before = u.startState.doc.toString();
+            const after = this.reanchoredText(before);
+            if (after) this.saveOnClose.save(before, after);
+          }
+          this.saveOnClose = target;
+        }
         // Tabellen-Widgets entstehen/verschwinden auch bei Selektions- und
         // Viewport-Wechseln (Cursor rein/raus), nicht nur bei Doc-Änderungen.
         if (u.docChanged || u.selectionSet || u.viewportChanged) this.scheduleTableHighlight();
@@ -107,8 +146,10 @@ function editorAnchorTrackerClass(plugin: EditorExtensionHost) {
         const text = u.state.doc.toString();
         const isSelf = u.transactions.some((tr) => tr.annotation(selfEdit));
         const oldText = u.startState.doc.toString();
-        const oldProseLen = parseDocument(oldText).prose.length;
-        const newProseLen = parseDocument(text).prose.length;
+        const oldDoc = this.readDocument(oldText);
+        const oldProseLen = oldDoc.prose.length;
+        const newDoc = this.readDocument(text);
+        const newProseLen = newDoc.prose.length;
         const fullReplace = isFullReplace(u.changes);
         const touchesBlock = changesTouchCommentBlock(u.changes, oldProseLen, newProseLen);
         const acceptanceHistory = isSuggestionAcceptanceHistoryUpdate(u, oldText, text);
@@ -117,20 +158,23 @@ function editorAnchorTrackerClass(plugin: EditorExtensionHost) {
           oldProseLen,
           plugin.isApplyingSuggestion() || acceptanceHistory
         );
+        // Preserve quote edits made in this same transaction, including multi-range
+        // sync/AI edits; the stored-anchor check below protects explicit re-anchoring.
         const pending =
-          (this.dirty || acceptanceHistory) && touchesBlock && preservePending
+          !isSelf && touchesBlock && preservePending
             ? mapAnchors(this.anchors, u.changes).filter((anchor) => anchor.to <= newProseLen)
             : [];
         if (isSelf || fullReplace || touchesBlock) {
           this.syncFromDoc(text);
           if (pending.length > 0) {
-            const doc = parseDocument(text);
+            const doc = this.readDocument(text);
             if (!doc.error) {
               const recoverable = new Set(
                 Object.entries(doc.comments)
                   .filter(
-                    ([, comment]) =>
+                    ([id, comment]) =>
                       comment.status === "open" &&
+                      (acceptanceHistory || JSON.stringify(comment.anchor) === JSON.stringify(oldDoc.comments[id]?.anchor)) &&
                       resolveAnchor(doc.prose, comment.anchor).kind === "orphaned"
                   )
                   .map(([id]) => id)
@@ -148,7 +192,8 @@ function editorAnchorTrackerClass(plugin: EditorExtensionHost) {
           u.changes.iterChangedRanges((_fromA, _toA, fromB, toB) => {
             ranges.push({ from: fromB, to: toB });
           });
-          if (rangesTouchTable(text, newProseLen, ranges)) {
+          const hasOpenComments = this.anchors.length > 0 || Object.values(newDoc.comments).some((comment) => comment.status === "open");
+          if (hasOpenComments && rangesTouchTable(text, newProseLen, ranges, this.tablesFor(text, newProseLen).tables)) {
             // Tabellen-Edit: Positionen durch die Änderung mappen (Anker folgen
             // echten Text-Edits wie in Prosa). Anker, die bei Obsidians Tabellen-
             // Neuformatierung (Ganz-Block-Replace) kollabieren, per exaktem Text
@@ -157,7 +202,7 @@ function editorAnchorTrackerClass(plugin: EditorExtensionHost) {
             const mapped = mapAnchors(this.anchors, u.changes);
             const survived = new Set(mapped.map((a) => a.id));
             this.anchors = mapped;
-            const doc = parseDocument(text);
+            const doc = this.readDocument(text);
             for (const [id, c] of Object.entries(doc.comments)) {
               if (c.status === "resolved" || survived.has(id)) continue;
               const r = resolveAnchor(doc.prose, c.anchor);
@@ -168,11 +213,11 @@ function editorAnchorTrackerClass(plugin: EditorExtensionHost) {
             this.scheduleReanchor();
           } else {
             this.anchors = mapAnchors(this.anchors, u.changes);
-            this.dirty = true;
-            this.scheduleReanchor();
+            this.dirty = this.anchors.length > 0;
+            if (this.dirty) this.scheduleReanchor();
           }
         }
-        this.decorations = this.buildDecorations();
+        this.decorations = this.anchors.length ? this.buildDecorations() : Decoration.none;
       }
 
       buildDecorations(): DecorationSet {
@@ -195,9 +240,13 @@ function editorAnchorTrackerClass(plugin: EditorExtensionHost) {
           key: "tc-table-highlight",
           read: () => null,
           write: () => {
-            const text = this.view.state.doc.toString();
-            const proseLen = parseDocument(text).prose.length;
-            applyTableHighlights(this.view, this.anchors, text, proseLen, (id) => void plugin.openSidebar(id));
+            if (this.destroyed) return;
+            if (this.anchors.length === 0) {
+              clearTableHighlights(this.view);
+              return;
+            }
+            const { text, proseLen, tables } = this.tablesFor();
+            applyTableHighlights(this.view, this.anchors, text, proseLen, (id) => void plugin.openSidebar(id), tables);
           },
         });
       }
@@ -221,7 +270,7 @@ function editorAnchorTrackerClass(plugin: EditorExtensionHost) {
         // gerade bearbeitete Anker geht verloren, das spätere Reanchor no-opt dann.
         if (this.dirty) this.performReanchor();
         const text = this.view.state.doc.toString();
-        const changes = normalizeTrailingChanges(text, parseDocument(text));
+        const changes = normalizeTrailingChanges(text, this.readDocument(text));
         if (!changes) return;
         this.view.dispatch({
           changes,
@@ -242,9 +291,20 @@ function editorAnchorTrackerClass(plugin: EditorExtensionHost) {
        * lebenden Anker zurück in den Block (nur die Block-Region wird ersetzt).
        */
       performReanchor(): void {
-        if (!this.dirty) return;
+        if (this.timer !== null) { window.clearTimeout(this.timer); this.timer = null; }
+        if (!this.dirty || this.destroyed) return;
         this.dirty = false;
         const text = this.view.state.doc.toString();
+        const serialized = this.reanchoredText(text);
+        if (!serialized) return;
+        const proseLen = this.readDocument(text).prose.length;
+        this.view.dispatch({
+          changes: { from: proseLen, to: text.length, insert: serialized.slice(proseLen) },
+          annotations: [selfEdit.of(true), Transaction.addToHistory.of(false)],
+        });
+      }
+
+      private reanchoredText(text: string): string | undefined {
         const doc = parseDocument(text);
         if (doc.error || Object.keys(doc.comments).length === 0) return;
         let changed = false;
@@ -257,7 +317,7 @@ function editorAnchorTrackerClass(plugin: EditorExtensionHost) {
           // ist (= echte Bearbeitung des Zitats). Ist er noch da, war die Änderung
           // nur drumherum (z.B. Obsidians Tabellen-Neuformatierung) — ein Rewrite
           // aus evtl. verschobenen Positionen würde den Anker korrumpieren.
-          if (resolveAnchor(doc.prose, cur).kind === "resolved") continue;
+          if (cur.exact && doc.prose.includes(cur.exact)) continue;
           const next = makeAnchor(doc.prose, t.from, t.to);
           if (
             next.exact &&
@@ -271,11 +331,7 @@ function editorAnchorTrackerClass(plugin: EditorExtensionHost) {
           }
         }
         if (!changed) return;
-        const serialized = serializeDocument(doc, plugin.settings.schemaHint);
-        this.view.dispatch({
-          changes: { from: doc.prose.length, to: text.length, insert: serialized.slice(doc.prose.length) },
-          annotations: [selfEdit.of(true), Transaction.addToHistory.of(false)],
-        });
+        return serializeDocument(doc, plugin.settings.schemaHint);
       }
     }
   );

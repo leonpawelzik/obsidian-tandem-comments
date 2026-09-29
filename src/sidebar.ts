@@ -2,6 +2,7 @@ import {
   type HoverParent,
   type HoverPopover,
   type PaneType,
+  Component,
   ItemView,
   Keymap,
   MarkdownRenderer,
@@ -34,6 +35,13 @@ import {
 import type { Anchor, ResolvedComment } from "./types";
 
 export const VIEW_TYPE_COMMENTS = "tandem-comments-sidebar";
+
+interface RenderedCard {
+  element: HTMLElement;
+  component: Component;
+  signature: string;
+  record: ResolvedComment;
+}
 
 interface Draft {
   filePath: string;
@@ -92,6 +100,38 @@ export class CommentSidebar extends ItemView implements HoverParent {
   private draft: Draft | null = null;
   private showResolved: boolean;
   private focusedId: string | null = null;
+  private renderVersion = 0;
+  private scheduledRender: Promise<void> | null = null;
+  private closed = false;
+  private cards = new Map<string, RenderedCard>();
+  private cardContext = "";
+  private renderedFile: TFile | null = null;
+
+  async onClose(): Promise<void> {
+    this.closed = true;
+    this.renderVersion++;
+    this.clearCards();
+  }
+
+  private clearCards(): void {
+    for (const card of this.cards.values()) this.removeChild(card.component);
+    this.cards.clear();
+  }
+
+  private clearFocus(): void {
+    for (const card of this.cards.values()) card.element.removeClass("tc-focused");
+  }
+
+  private focusExisting(): boolean {
+    if (!this.focusedId || this.renderedFile !== this.app.workspace.getActiveFile()) return false;
+    const card = this.cards.get(this.focusedId)?.element;
+    if (!card?.isConnected) return false;
+    this.clearFocus();
+    card.addClass("tc-focused");
+    card.scrollIntoView({ block: "nearest" });
+    this.focusedId = null;
+    return true;
+  }
 
   constructor(leaf: WorkspaceLeaf, private plugin: CommentsPlugin) {
     super(leaf);
@@ -109,6 +149,7 @@ export class CommentSidebar extends ItemView implements HoverParent {
   }
 
   async onOpen(): Promise<void> {
+    this.closed = false;
     this.registerEvent(this.app.workspace.on("file-open", () => void this.render()));
     this.registerEvent(
       this.app.vault.on("modify", (f) => {
@@ -136,8 +177,9 @@ export class CommentSidebar extends ItemView implements HoverParent {
   }
 
   focusComment(id: string): void {
+    this.clearFocus();
     this.focusedId = id;
-    void this.render();
+    if (!this.focusExisting()) void this.render();
   }
 
   toggleResolved(): void {
@@ -171,21 +213,56 @@ export class CommentSidebar extends ItemView implements HoverParent {
     );
   }
 
-  async render(): Promise<void> {
-    const container = this.contentEl;
-    const prevScroll = container.scrollTop;
-    container.empty();
-    container.addClass("tc-sidebar");
-
-    const file = this.app.workspace.getActiveFile();
-    if (!file || file.extension !== "md") {
-      container.createDiv({ text: "No active Markdown file.", cls: "tc-empty" });
-      return;
+  render(): Promise<void> {
+    if (this.closed) return Promise.resolve();
+    this.renderVersion++;
+    if (!this.scheduledRender) {
+      this.scheduledRender = Promise.resolve().then(() => {
+        this.scheduledRender = null;
+        return this.renderLatest(this.renderVersion);
+      });
     }
-    const doc = await this.plugin.readDoc(file);
+    return this.scheduledRender;
+  }
+
+  private async renderLatest(version: number): Promise<void> {
+    const live = this.contentEl;
+    const file = this.app.workspace.getActiveFile();
+    const doc = file?.extension === "md" ? await this.plugin.readDoc(file) : null;
+    if (this.closed || version !== this.renderVersion || file !== this.app.workspace.getActiveFile()) return;
+    this.clearFocus();
+    this.renderedFile = file;
+    const prevScroll = live.scrollTop;
+    // Build only new nodes offscreen; existing cards stay attached until commit.
+    const container = live.ownerDocument.createElement("div");
+    const desired: HTMLElement[] = [];
+    const context = JSON.stringify([file?.path, this.plugin.settings]);
+    if (context !== this.cardContext) { this.clearCards(); this.cardContext = context; }
+    live.addClass("tc-sidebar");
+    const commit = (): void => {
+      const nodes = desired.length ? desired : Array.from(container.children);
+      const retained = new Set<Element>(nodes);
+      // Remove obsolete headers/sections first, so they do not force every
+      // retained card to move while walking the desired order.
+      for (const node of Array.from(live.children)) if (!retained.has(node)) live.removeChild(node);
+      let cursor = live.firstChild;
+      for (const node of nodes) {
+        if (node === cursor) cursor = cursor.nextSibling;
+        else live.insertBefore(node, cursor);
+      }
+      while (cursor) { const next = cursor.nextSibling; live.removeChild(cursor); cursor = next; }
+      live.scrollTop = prevScroll;
+      this.focusExisting();
+    };
+    if (!doc || !file) {
+      this.clearCards();
+      container.createDiv({ text: "No active Markdown file.", cls: "tc-empty" });
+      commit(); return;
+    }
     if (doc.error) {
+      this.clearCards();
       container.createDiv({ text: "tandem-comments block is invalid: " + doc.error, cls: "tc-error" });
-      return;
+      commit(); return;
     }
 
     const header = container.createDiv({ cls: "tc-header" });
@@ -201,7 +278,10 @@ export class CommentSidebar extends ItemView implements HoverParent {
     if (this.draft && this.draft.filePath === file.path) this.renderDraft(container, file);
     else this.draft = null;
 
-    const all = resolveAll(doc.prose, doc.comments);
+    const visibleComments = this.showResolved ? doc.comments : Object.fromEntries(
+      Object.entries(doc.comments).filter(([, comment]) => comment.status === "open")
+    );
+    const all = resolveAll(doc.prose, visibleComments);
     const open = this.sortComments(
       all.filter((r) => r.comment.status === "open" && r.resolution.kind === "resolved")
     );
@@ -210,21 +290,44 @@ export class CommentSidebar extends ItemView implements HoverParent {
     );
     const done = this.sortComments(all.filter((r) => r.comment.status === "resolved"));
 
-    if (!open.length && !orphans.length && !(this.showResolved && done.length) && !this.draft) {
-      container.createDiv({ text: "No comments or suggestions in this file.", cls: "tc-empty" });
-      return;
-    }
-
-    for (const r of open) this.renderComment(container, file, r);
+    desired.push(...Array.from(container.children) as HTMLElement[]);
+    const visible = new Set<string>();
+    const appendCard = (r: ResolvedComment): void => {
+      visible.add(r.id);
+      const signature = JSON.stringify([r.comment, r.resolution.kind,
+        r.resolution.kind === "resolved" && !!r.resolution.ambiguous]);
+      let cached = this.cards.get(r.id);
+      // Explicit refresh also exits inline editing/cancel flows.
+      if (cached && (cached.signature !== signature || cached.element.querySelector(".tc-edit-input"))) {
+        this.removeChild(cached.component);
+        this.cards.delete(r.id);
+        cached = undefined;
+      }
+      if (!cached) {
+        const component = this.addChild(new Component());
+        const element = this.renderComment(container, file, r, component);
+        cached = { element, component, signature, record: r };
+        this.cards.set(r.id, cached);
+      } else {
+        // Event handlers retain this record, so navigation uses current anchors.
+        Object.assign(cached.record, r);
+      }
+      desired.push(cached.element);
+    };
+    for (const r of open) appendCard(r);
     if (orphans.length) {
-      container.createDiv({ text: "Orphaned — text passage not found", cls: "tc-section" });
-      for (const r of orphans) this.renderComment(container, file, r);
+      desired.push(container.createDiv({ text: "Orphaned — text passage not found", cls: "tc-section" }));
+      for (const r of orphans) appendCard(r);
     }
     if (this.showResolved && done.length) {
-      container.createDiv({ text: "Resolved", cls: "tc-section" });
-      for (const r of done) this.renderComment(container, file, r);
+      desired.push(container.createDiv({ text: "Resolved", cls: "tc-section" }));
+      for (const r of done) appendCard(r);
     }
-    container.scrollTop = prevScroll;
+    for (const [id, card] of this.cards) {
+      if (!visible.has(id)) { this.removeChild(card.component); this.cards.delete(id); }
+    }
+    if (!visible.size && !this.draft) desired.push(container.createDiv({ text: "No comments or suggestions in this file.", cls: "tc-empty" }));
+    commit();
   }
 
   private renderDraft(container: HTMLElement, file: TFile): void {
@@ -349,7 +452,7 @@ export class CommentSidebar extends ItemView implements HoverParent {
     window.setTimeout(() => replacement.focus(), 0);
   }
 
-  private renderComment(container: HTMLElement, file: TFile, r: ResolvedComment): void {
+  private renderComment(container: HTMLElement, file: TFile, r: ResolvedComment, component: Component): HTMLElement {
     const cls = ["tc-card"];
     if (r.comment.status === "resolved") cls.push("tc-resolved");
     if (
@@ -448,12 +551,6 @@ export class CommentSidebar extends ItemView implements HoverParent {
           );
         });
     };
-    if (r.id === this.focusedId) {
-      card.addClass("tc-focused");
-      window.setTimeout(() => card.scrollIntoView({ block: "nearest" }), 0);
-      this.focusedId = null;
-    }
-
     if (r.comment.suggestion) {
       const suggestion = r.comment.suggestion;
       const replacement =
@@ -571,7 +668,7 @@ export class CommentSidebar extends ItemView implements HoverParent {
       });
       // Use Obsidian's renderer and inherit its Markdown, sanitization, and
       // registered post-processor behavior.
-      void MarkdownRenderer.render(this.app, entry.text, textEl, file.path, this);
+      void MarkdownRenderer.render(this.app, entry.text, textEl, file.path, component);
       this.wireCommentLinks(textEl, file);
       const beginEdit = (): void => {
         const expected = { ...entry };
@@ -721,6 +818,7 @@ export class CommentSidebar extends ItemView implements HoverParent {
         }
       };
     }
+    return card;
   }
 
   private shouldSubmit(event: KeyboardEvent): boolean {

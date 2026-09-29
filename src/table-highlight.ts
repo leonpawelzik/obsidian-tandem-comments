@@ -115,9 +115,9 @@ export function findTables(text: string, limit: number = text.length): ParsedTab
 export function rangesTouchTable(
   text: string,
   proseLen: number,
-  ranges: { from: number; to: number }[]
+  ranges: { from: number; to: number }[],
+  tables: ParsedTable[] = findTables(text, proseLen)
 ): boolean {
-  const tables = findTables(text, proseLen);
   return tables.some((t) => ranges.some((r) => r.from <= t.to && r.to >= t.from));
 }
 
@@ -148,9 +148,8 @@ export function visibleText(md: string): string {
 }
 
 /** Findet das DOM-<table>, dessen Quell-Position im Bereich des Tabellenblocks liegt. */
-function findDomTable(view: EditorView, table: ParsedTable): HTMLTableElement | null {
-  const tables = view.contentDOM.querySelectorAll("table");
-  for (const el of Array.from(tables)) {
+function findDomTable(view: EditorView, table: ParsedTable, tables: HTMLTableElement[]): HTMLTableElement | null {
+  for (const el of tables) {
     let pos: number;
     try {
       pos = view.posAtDOM(el);
@@ -230,8 +229,17 @@ function wrapRange(
   return true;
 }
 
-/** Entfernt alle von uns injizierten Tabellen-Highlights (vor jedem Re-Apply). */
+interface HighlightSnapshot {
+  signature: string;
+  tables: HTMLTableElement[];
+  contents: string[];
+  spans: Element[];
+}
+const highlightedViews = new WeakMap<EditorView, HighlightSnapshot>();
+
+/** Remove injected highlights when their anchors or table widgets change. */
 export function clearTableHighlights(view: EditorView): void {
+  highlightedViews.delete(view);
   view.contentDOM.querySelectorAll<HTMLElement>("span.tc-highlight[data-tc-table]").forEach((span) => {
     const parent = span.parentNode;
     if (!parent) return;
@@ -250,10 +258,18 @@ export function applyTableHighlights(
   anchors: TrackedAnchor[],
   text: string,
   proseLen: number,
-  onClick: (id: string) => void
+  onClick: (id: string) => void,
+  tables: ParsedTable[] = findTables(text, proseLen)
 ): void {
+  const domTables = Array.from(view.contentDOM.querySelectorAll<HTMLTableElement>("table"));
+  const signature = JSON.stringify(anchors.map((a) => [a.id, a.from, a.to, text.slice(a.from, a.to)]));
+  const previous = highlightedViews.get(view);
+  const spans = Array.from(view.contentDOM.querySelectorAll("span.tc-highlight[data-tc-table]"));
+  if (previous && previous.signature === signature &&
+      previous.tables.length === domTables.length &&
+      domTables.every((table, i) => table === previous.tables[i] && table.innerHTML === previous.contents[i]) &&
+      spans.length === previous.spans.length && spans.every((span, i) => span === previous.spans[i])) return;
   clearTableHighlights(view);
-  const tables = findTables(text, proseLen);
   if (tables.length === 0) return;
   for (const a of anchors) {
     // Pro Anker absichern, damit ein Sonderfall nicht die übrigen Highlights killt.
@@ -262,7 +278,7 @@ export function applyTableHighlights(
       if (!table) continue;
       const cell = locateCell(table, a.from);
       if (!cell) continue;
-      const domTable = findDomTable(view, table);
+      const domTable = findDomTable(view, table, domTables);
       if (!domTable) continue;
       const cellEl = domCell(domTable, cell);
       if (!cellEl) continue;
@@ -278,4 +294,8 @@ export function applyTableHighlights(
       // ignorieren — dieser Anker wird in diesem Durchlauf einfach nicht markiert.
     }
   }
+  highlightedViews.set(view, { signature, tables: domTables,
+    contents: domTables.map((table) => table.innerHTML),
+    spans: Array.from(view.contentDOM.querySelectorAll("span.tc-highlight[data-tc-table]")),
+  });
 }
