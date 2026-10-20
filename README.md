@@ -22,6 +22,7 @@ Quote-anchored comments and edit suggestions for [Obsidian](https://obsidian.md)
 - **Resolve = remove** by default, keeping files clean (history mode available in settings)
 - **Copy & export:** copy any thread as Markdown (with or without its quote), or export all of a file's threads to a review note in a folder of your choice
 - **Invisible while you write:** the comment block is hidden in Live Preview and shows up in Reading View as a compact "💬 N threads" pill (which can be turned off)
+- **Graduate a thread or a single message:** carry the content of a discussion into the note's text, as tasks, or into a new note.
 - **AI-ready by design:** the block is plain, self-describing JSON; the settings tab exports a skill file that teaches Claude Code or Codex the format
 
 ## Installation
@@ -68,6 +69,7 @@ Each comment is anchored by a quote ([W3C TextQuoteSelector](https://www.w3.org/
 - **Resolve** with the checkmark next to the first entry of a thread
 - **Copy or delete** from the ⋯ menu on each entry. Deleting a reply keeps the rest of the thread; deleting the first entry removes the whole comment
 - **Jump to the passage** by clicking the quote at the top of a card
+- **Graduate** a whole thread or a single message with the ↑ arrow. When capturing a comment thread, deselect any messages you wish to omit and review before finally promoting the message into content.
 - **Show resolved** and **Export** from the sidebar header
 
 ### Commands

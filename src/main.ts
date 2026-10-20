@@ -10,6 +10,15 @@ import {
 } from "./author";
 import { confirmAction } from "./confirm-action";
 import { buildEditorExtension, type AnchorSaveTarget } from "./editor-extension";
+import {
+  buildGraduateNote,
+  finishGraduate,
+  graduateFailure,
+  graduateRecordText,
+  planGraduate,
+  type GraduateKind,
+  type GraduatePlan,
+} from "./graduate";
 import { buildHiddenBlockExtension } from "./hidden-block";
 import {
   buildExportNote,
@@ -36,7 +45,7 @@ import {
   resolveAnchor,
   serializeDocument,
 } from "./store";
-import type { Anchor, ParsedDoc } from "./types";
+import type { Anchor, ParsedDoc, ThreadEntry } from "./types";
 
 export default class CommentsPlugin extends Plugin {
   settings: CommentsSettings = DEFAULT_SETTINGS;
@@ -417,6 +426,96 @@ export default class CommentsPlugin extends Plugin {
       this.applyingSuggestion = false;
     }
     return plan;
+  }
+
+  /**
+   * Places `text` in the file's text, at the editor cursor or over the quote,
+   * and records it in the thread, as one undoable editor transaction.
+   */
+  graduateToText(
+    file: TFile,
+    id: string,
+    kind: Exclude<GraduateKind, "note">,
+    text: string,
+    replaceQuote: boolean,
+    resolve: boolean
+  ): GraduatePlan {
+    const editor = this.editorForFile(file);
+    if (!editor) return { ok: false, reason: "no-editor" };
+    const plan = planGraduate(editor.getValue(), id, {
+      text,
+      placement: replaceQuote
+        ? { kind: "quote" }
+        : { kind: "cursor", offset: editor.posToOffset(editor.getCursor()) },
+      record: { author: this.currentAuthor(), ts: this.nowTs(), text: graduateRecordText(kind) },
+      resolve,
+      behavior: this.settings.resolveBehavior,
+      schemaHint: this.settings.schemaHint,
+    });
+    if (!plan.ok) return plan;
+    this.applyingSuggestion = true;
+    try {
+      commitSuggestionAcceptance(editor, plan);
+    } finally {
+      this.applyingSuggestion = false;
+    }
+    return plan;
+  }
+
+  /**
+   * Creates a note holding the quote and the chosen messages, where Obsidian
+   * puts new notes, and links it from a reply in the thread.
+   * Returns the new note's path, or null after showing why it failed.
+   */
+  async graduateToNote(
+    file: TFile,
+    id: string,
+    name: string,
+    thread: ThreadEntry[],
+    resolve: boolean
+  ): Promise<string | null> {
+    const doc = await this.readDoc(file);
+    if (doc.error) {
+      new Notice("tandem-comments block is invalid — please fix the JSON: " + doc.error);
+      return null;
+    }
+    const comment = doc.comments[id];
+    if (graduateFailure(comment) || !comment) {
+      new Notice("Only open comment threads can be graduated.");
+      return null;
+    }
+    const title = name.trim().replace(/\.md$/i, "");
+    if (!title || /[\\/:*?"<>|#^[\]]/.test(title)) {
+      new Notice('A note name cannot be empty or contain any of \\ / : * ? " < > | # ^ [ ]');
+      return null;
+    }
+    const folder = this.app.fileManager.getNewFileParent(file.path).path;
+    const path = normalizePath(folder === "/" ? `${title}.md` : `${folder}/${title}.md`);
+    if (this.app.vault.getAbstractFileByPath(path)) {
+      new Notice(`${path} already exists. Choose another name.`);
+      return null;
+    }
+    const note = await this.app.vault.create(
+      path,
+      buildGraduateNote({
+        sourceLink: this.app.fileManager.generateMarkdownLink(file, path),
+        quote: comment.anchor.exact,
+        thread,
+        formatTs,
+      })
+    );
+    const link = this.app.fileManager.generateMarkdownLink(note, file.path);
+    const ok = await this.updateDoc(file, (d) =>
+      finishGraduate(
+        d.comments,
+        id,
+        { author: this.currentAuthor(), ts: this.nowTs(), text: graduateRecordText("note", link) },
+        resolve,
+        this.settings.resolveBehavior
+      )
+    );
+    if (!ok) new Notice(`Created ${path}, but the thread could not be updated.`);
+    return path;
   }
 
   /** Aktuelle Editor-Selektion als Anker (für Re-Anchoring von Orphans). */

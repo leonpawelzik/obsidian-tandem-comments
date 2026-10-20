@@ -330,6 +330,36 @@ function finishSuggestion(
 }
 
 /**
+ * Replaces `doc.prose[from, to)` with `insert` and moves the anchors of the
+ * other open comments through that change. `skipId` is left out of the remap,
+ * for the comment whose own passage is being replaced.
+ */
+export function replaceProse(
+  doc: ParsedDoc,
+  from: number,
+  to: number,
+  insert: string,
+  skipId?: string
+): void {
+  const oldProse = doc.prose;
+  const tracked = Object.entries(doc.comments).flatMap(([otherId, other]) => {
+    if (otherId === skipId || other.status !== "open") return [];
+    const otherResolution = resolveAnchor(oldProse, other.anchor);
+    return otherResolution.kind === "resolved" && !otherResolution.ambiguous
+      ? [{ id: otherId, from: otherResolution.start, to: otherResolution.end }]
+      : [];
+  });
+  const change = ChangeSet.of({ from, to, insert }, oldProse.length);
+  doc.prose = oldProse.slice(0, from) + insert + oldProse.slice(to);
+  for (const mapped of mapAnchors(tracked, change)) {
+    const surviving = doc.comments[mapped.id];
+    if (surviving && mapped.to <= doc.prose.length) {
+      surviving.anchor = makeAnchor(doc.prose, mapped.from, mapped.to);
+    }
+  }
+}
+
+/**
  * Applies an open replacement suggestion to a parsed document. The caller is
  * responsible for committing the returned prose + comment-block changes as one
  * editor transaction.
@@ -358,25 +388,7 @@ export function acceptSuggestion(
     return { ok: false, reason: "orphaned" };
   }
 
-  const oldProse = doc.prose;
-  const survivingAnchors = Object.entries(doc.comments).flatMap(([otherId, other]) => {
-    if (otherId === id || other.status !== "open") return [];
-    const otherResolution = resolveAnchor(oldProse, other.anchor);
-    return otherResolution.kind === "resolved" && !otherResolution.ambiguous
-      ? [{ id: otherId, from: otherResolution.start, to: otherResolution.end }]
-      : [];
-  });
-  const replacementChange = ChangeSet.of(
-    { from: resolution.start, to: resolution.end, insert: replacement },
-    oldProse.length
-  );
-  doc.prose = oldProse.slice(0, resolution.start) + replacement + oldProse.slice(resolution.end);
-  for (const mapped of mapAnchors(survivingAnchors, replacementChange)) {
-    const surviving = doc.comments[mapped.id];
-    if (surviving && mapped.to <= doc.prose.length) {
-      surviving.anchor = makeAnchor(doc.prose, mapped.from, mapped.to);
-    }
-  }
+  replaceProse(doc, resolution.start, resolution.end, replacement, id);
   finishSuggestion(doc.comments, id, "accepted", behavior);
   return { ok: true, start: resolution.start, end: resolution.end, replacement };
 }

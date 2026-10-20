@@ -54,6 +54,17 @@
   margin-bottom: 6px;
 }
 
+.tc-quote-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 4px;
+}
+
+.tc-quote-row .tc-quote {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
 .tc-quote-link {
   cursor: pointer;
 }
@@ -235,6 +246,40 @@
 
 .tc-edit-actions {
   justify-content: flex-end;
+}
+
+.tc-graduate-pick {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 4px;
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+.tc-graduate-pick-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--background-modifier-border);
+}
+
+.tc-graduate-pick-row input[type="checkbox"] {
+  margin-top: 3px;
+  flex-shrink: 0;
+}
+
+.tc-graduate-pick-text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.tc-graduate-resolve {
+  display: block;
+  margin-top: 6px;
+  font-size: var(--font-ui-smaller);
 }
 
 .tc-section {

@@ -16,6 +16,8 @@ import {
 import { resolveAuthorColor, type AuthorColorOverrides } from "./author-color";
 import { confirmAction } from "./confirm-action";
 import { formatComment, formatTs } from "./export";
+import type { GraduateKind } from "./graduate";
+import { renderGraduatePanel } from "./graduate-panel";
 import type CommentsPlugin from "./main";
 import { shouldSubmitComment, sortSidebarComments } from "./sidebar-preferences";
 import { formatSidebarTimestamp } from "./timestamp";
@@ -509,6 +511,31 @@ export class CommentSidebar extends ItemView implements HoverParent {
         })();
       };
     };
+    const canGraduate = r.comment.status === "open" && !r.comment.suggestion;
+    const openGraduate = (kind: GraduateKind, only?: number) => (): void =>
+      renderGraduatePanel(this.plugin, card, file, r, kind, only, () => void this.render());
+    const addGraduateItems = (menu: Menu, only?: number): void => {
+      const target = only === undefined ? "" : "message ";
+      menu.addItem((item) =>
+        item.setTitle(`Graduate ${target}to text`).setIcon("text-cursor-input").onClick(openGraduate("text", only))
+      );
+      menu.addItem((item) =>
+        item.setTitle(`Graduate ${target}to task`).setIcon("square-check").onClick(openGraduate("task", only))
+      );
+      menu.addItem((item) =>
+        item.setTitle(`Graduate ${target}to new note`).setIcon("file-plus").onClick(openGraduate("note", only))
+      );
+    };
+    const addGraduateButton = (parent: HTMLElement, only?: number): void => {
+      const label = only === undefined ? "Graduate thread" : "Graduate message";
+      const graduateBtn = parent.createEl("button", {
+        cls: "tc-entry-action clickable-icon",
+        attr: { "aria-label": label, "aria-haspopup": "menu", "aria-expanded": "false" },
+      });
+      setIcon(graduateBtn, "arrow-up");
+      setTooltip(graduateBtn, label);
+      graduateBtn.onclick = () => showMenu(graduateBtn, (menu) => addGraduateItems(menu, only));
+    };
     const addMenuTrigger = (
       controls: HTMLElement,
       ariaLabel: string,
@@ -615,7 +642,9 @@ export class CommentSidebar extends ItemView implements HoverParent {
         });
       }
     } else {
-      const quote = card.createDiv({ text: `"${truncate(r.comment.anchor.exact, 80)}"`, cls: "tc-quote" });
+      const quoteRow = canGraduate ? card.createDiv({ cls: "tc-quote-row" }) : card;
+      const quote = quoteRow.createDiv({ text: `"${truncate(r.comment.anchor.exact, 80)}"`, cls: "tc-quote" });
+      if (canGraduate) addGraduateButton(quoteRow);
       if (r.resolution.kind === "resolved") {
         quote.addClass("tc-quote-link");
         quote.onclick = () => this.plugin.revealAnchor(file, r.comment.anchor);
@@ -645,9 +674,8 @@ export class CommentSidebar extends ItemView implements HoverParent {
       );
       this.addTimestamp(meta, entry.ts);
       const entryControls = meta.createDiv({ cls: "tc-entry-controls" });
-      if (entryIndex === 0 && r.comment.status === "open" && !r.comment.suggestion) {
-        addResolveButton(entryControls);
-      }
+      if (canGraduate && entry.text.trim()) addGraduateButton(entryControls, entryIndex);
+      if (entryIndex === 0 && canGraduate) addResolveButton(entryControls);
       addMenuTrigger(
         entryControls,
         `More options for comment by ${entry.author}`,
