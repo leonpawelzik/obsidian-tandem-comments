@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { findTables, locateCell, rangesTouchTable, visibleText } from "../src/table-highlight";
+import { findTables, locateCell, rangesTouchTable } from "../src/table-highlight";
 
 const TABLE = ["| Item | Notes |", "| ---- | ----- |", "| Pricing | cut prices hard |"].join("\n");
 
@@ -80,25 +80,5 @@ describe("rangesTouchTable", () => {
 
   it("is false when there are no tables", () => {
     expect(rangesTouchTable("just prose", 10, [{ from: 0, to: 4 }])).toBe(false);
-  });
-});
-
-describe("visibleText", () => {
-  it("strips bold and italic", () => {
-    expect(visibleText("cut **prices** hard")).toBe("cut prices hard");
-    expect(visibleText("a *very* nice _idea_")).toBe("a very nice idea");
-  });
-
-  it("strips strikethrough, highlight and code", () => {
-    expect(visibleText("~~old~~ ==new== `code`")).toBe("old new code");
-  });
-
-  it("reduces links and wikilinks to their visible label", () => {
-    expect(visibleText("see [the docs](https://x.com)")).toBe("see the docs");
-    expect(visibleText("[[Note|alias]] and [[Other]]")).toBe("alias and Other");
-  });
-
-  it("leaves plain text untouched", () => {
-    expect(visibleText("just plain text")).toBe("just plain text");
   });
 });

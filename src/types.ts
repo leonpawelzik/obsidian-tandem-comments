@@ -60,3 +60,10 @@ export interface ResolvedComment {
   comment: CommentEntry;
   resolution: AnchorResolution;
 }
+
+/** Zu markierende Spanne [start, end) im textContent von `root` (Highlights in Tabellen-/Callout-Widgets). */
+export interface HighlightTarget {
+  root: HTMLElement;
+  start: number;
+  end: number;
+}
