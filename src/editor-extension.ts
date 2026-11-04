@@ -10,7 +10,9 @@ import {
   type TrackedAnchor,
 } from "./reanchor";
 import { createDocumentReader, makeAnchor, normalizeTrailingChanges, parseDocument, resolveAnchor, serializeDocument } from "./store";
-import { applyTableHighlights, clearTableHighlights, findTables, rangesTouchTable, type ParsedTable } from "./table-highlight";
+import { findCallouts, type ParsedCallout } from "./callout-highlight";
+import { findTables, rangesTouchTable, type ParsedTable } from "./table-highlight";
+import { applyWidgetHighlights, clearWidgetHighlights } from "./widget-highlight";
 
 /** Markiert Transaktionen, die das Plugin selbst dispatcht (Block-Rewrite). */
 export const selfEdit = Annotation.define<boolean>();
@@ -81,24 +83,24 @@ function editorAnchorTrackerClass(plugin: EditorExtensionHost) {
       destroyed = false;
       timer: number | null = null;
       normalizeTimer: number | null = null;
-      tableDoc: EditorView["state"]["doc"] | null = null;
-      tableSnapshot: { text: string; proseLen: number; tables: ParsedTable[] } | null = null;
+      widgetDoc: EditorView["state"]["doc"] | null = null;
+      widgetSnapshot: { text: string; proseLen: number; tables: ParsedTable[]; callouts: ParsedCallout[] } | null = null;
 
-      tablesFor(text?: string, proseLen?: number) {
-        if (this.tableDoc !== this.view.state.doc || !this.tableSnapshot) {
+      widgetsFor(text?: string, proseLen?: number) {
+        if (this.widgetDoc !== this.view.state.doc || !this.widgetSnapshot) {
           const raw = text ?? this.view.state.doc.toString();
           const length = proseLen ?? this.readDocument(raw).prose.length;
-          this.tableDoc = this.view.state.doc;
-          this.tableSnapshot = { text: raw, proseLen: length, tables: findTables(raw, length) };
+          this.widgetDoc = this.view.state.doc;
+          this.widgetSnapshot = { text: raw, proseLen: length, tables: findTables(raw, length), callouts: findCallouts(raw, length) };
         }
-        return this.tableSnapshot;
+        return this.widgetSnapshot;
       }
 
       constructor(readonly view: EditorView) {
         this.saveOnClose = plugin.captureAnchorSave?.(view);
         this.syncFromDoc(view.state.doc.toString());
         this.decorations = this.buildDecorations();
-        this.scheduleTableHighlight();
+        this.scheduleWidgetHighlight();
         this.scheduleNormalize();
       }
 
@@ -140,7 +142,7 @@ function editorAnchorTrackerClass(plugin: EditorExtensionHost) {
         }
         // Tabellen-Widgets entstehen/verschwinden auch bei Selektions- und
         // Viewport-Wechseln (Cursor rein/raus), nicht nur bei Doc-Änderungen.
-        if (u.docChanged || u.selectionSet || u.viewportChanged) this.scheduleTableHighlight();
+        if (u.docChanged || u.selectionSet || u.viewportChanged) this.scheduleWidgetHighlight();
         if (!u.docChanged) return;
         this.scheduleNormalize();
         const text = u.state.doc.toString();
@@ -193,7 +195,7 @@ function editorAnchorTrackerClass(plugin: EditorExtensionHost) {
             ranges.push({ from: fromB, to: toB });
           });
           const hasOpenComments = this.anchors.length > 0 || Object.values(newDoc.comments).some((comment) => comment.status === "open");
-          if (hasOpenComments && rangesTouchTable(text, newProseLen, ranges, this.tablesFor(text, newProseLen).tables)) {
+          if (hasOpenComments && rangesTouchTable(text, newProseLen, ranges, this.widgetsFor(text, newProseLen).tables)) {
             // Tabellen-Edit: Positionen durch die Änderung mappen (Anker folgen
             // echten Text-Edits wie in Prosa). Anker, die bei Obsidians Tabellen-
             // Neuformatierung (Ganz-Block-Replace) kollabieren, per exaktem Text
@@ -231,22 +233,22 @@ function editorAnchorTrackerClass(plugin: EditorExtensionHost) {
       }
 
       /**
-       * Highlights innerhalb gerenderter Tabellen-Widgets müssen direkt ins DOM
+       * Highlights innerhalb gerenderter Tabellen- und Callout-Widgets müssen direkt ins DOM
        * geschrieben werden (CM-mark-Dekorationen werden dort verschluckt). Das
        * läuft in der Measure-/Write-Phase, nachdem Obsidian die Widgets gebaut hat.
        */
-      scheduleTableHighlight(): void {
+      scheduleWidgetHighlight(): void {
         this.view.requestMeasure({
-          key: "tc-table-highlight",
+          key: "tc-widget-highlight",
           read: () => null,
           write: () => {
             if (this.destroyed) return;
             if (this.anchors.length === 0) {
-              clearTableHighlights(this.view);
+              clearWidgetHighlights(this.view);
               return;
             }
-            const { text, proseLen, tables } = this.tablesFor();
-            applyTableHighlights(this.view, this.anchors, text, proseLen, (id) => void plugin.openSidebar(id), tables);
+            const { text, proseLen, tables, callouts } = this.widgetsFor();
+            applyWidgetHighlights(this.view, this.anchors, text, proseLen, (id) => void plugin.openSidebar(id), tables, callouts);
           },
         });
       }
