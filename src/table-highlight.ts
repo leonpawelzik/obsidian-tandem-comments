@@ -1,5 +1,5 @@
 import type { EditorView } from "@codemirror/view";
-import { splitLines, visibleText, type Line } from "./markdown-text";
+import { countOccurrences, locateVisibleText, splitLines, visibleText, withoutWhitespace, type Line } from "./markdown-text";
 import type { TrackedAnchor } from "./reanchor";
 import type { HighlightTarget } from "./types";
 
@@ -141,6 +141,38 @@ function domCell(domTable: HTMLTableElement, cell: Cell): HTMLTableCellElement |
 }
 
 /**
+ * Findet die Stelle des Ankers [from, to) in der gerenderten Tabellenzelle: das
+ * Element, das `cellOf` für Tabelle und Zelle liefert, und die Spanne in dessen
+ * textContent (passend für wrapRange). Der DOM-Zugriff steckt komplett in
+ * `cellOf`, damit sich die Logik ohne DOM testen lässt.
+ */
+export function locateInTable<T extends { textContent: string | null }>(
+  text: string,
+  tables: ParsedTable[],
+  from: number,
+  to: number,
+  cellOf: (table: ParsedTable, cell: Cell) => T | null
+): { root: T; start: number; end: number } | null {
+  const table = tables.find((t) => from >= t.from && to <= t.to);
+  if (!table) return null;
+  const cell = locateCell(table, from);
+  if (!cell) return null;
+  // Quell-Offsets passen nicht zum gerenderten Zelltext: Inline-Markdown
+  // (**fett**, [Label](url) …) wird gerendert weggekürzt, und Syntax *vor*
+  // dem Anker verschiebt den Offset. Daher im gerenderten Text nach dem
+  // sichtbaren Text suchen statt zu rechnen — und zwar nach dem Vorkommen,
+  // das der Anker in der Zelle ist, damit ein wiederholtes Wort an der
+  // richtigen Stelle markiert wird.
+  const visible = withoutWhitespace(visibleText(text.slice(from, to))).text;
+  if (!visible) return null;
+  const root = cellOf(table, cell);
+  if (!root) return null;
+  const before = withoutWhitespace(visibleText(text.slice(cell.from, from))).text;
+  const span = locateVisibleText(root.textContent ?? "", visible, countOccurrences(before, visible));
+  return span && { root, ...span };
+}
+
+/**
  * Wo im gerenderten Tabellen-DOM der Anker markiert wird, oder null, wenn er
  * nicht in einer Tabellenzelle liegt.
  */
@@ -151,20 +183,8 @@ export function locateTableHighlight(
   tables: ParsedTable[],
   domTables: HTMLTableElement[]
 ): HighlightTarget | null {
-  const table = tables.find((t) => anchor.from >= t.from && anchor.to <= t.to);
-  if (!table) return null;
-  const cell = locateCell(table, anchor.from);
-  if (!cell) return null;
-  const domTable = findDomTable(view, table, domTables);
-  if (!domTable) return null;
-  const cellEl = domCell(domTable, cell);
-  if (!cellEl) return null;
-  // Quell-Offsets passen nicht zum gerenderten Zelltext: Inline-Markdown
-  // (**fett**, [Label](url) …) wird gerendert weggekürzt, und Syntax *vor*
-  // dem Anker verschiebt den Offset. Daher im gerenderten Text nach dem
-  // sichtbaren Text suchen statt zu rechnen.
-  const visible = visibleText(text.slice(anchor.from, anchor.to));
-  if (!visible) return null;
-  const k = cellEl.textContent?.indexOf(visible) ?? -1;
-  return k >= 0 ? { root: cellEl, start: k, end: k + visible.length } : null;
+  return locateInTable(text, tables, anchor.from, anchor.to, (table, cell) => {
+    const domTable = findDomTable(view, table, domTables);
+    return domTable && domCell(domTable, cell);
+  });
 }

@@ -1,5 +1,5 @@
 import type { EditorView } from "@codemirror/view";
-import { splitLines, visibleText } from "./markdown-text";
+import { countOccurrences, locateVisibleText, splitLines, visibleText, withoutWhitespace } from "./markdown-text";
 import type { TrackedAnchor } from "./reanchor";
 import type { HighlightTarget } from "./types";
 
@@ -61,18 +61,6 @@ function calloutVisibleText(md: string, atLineStart: boolean, atCalloutStart = f
   return withoutWhitespace(visibleText(untyped)).text;
 }
 
-/** Entfernt jeden Whitespace; `offsets[i]` ist die Position des i-ten verbliebenen Zeichens im Original. */
-function withoutWhitespace(s: string): { text: string; offsets: number[] } {
-  let text = "";
-  const offsets: number[] = [];
-  for (let i = 0; i < s.length; i++) {
-    if (/\s/.test(s[i])) continue;
-    text += s[i];
-    offsets.push(i);
-  }
-  return { text, offsets };
-}
-
 /**
  * Durchsuchter Bereich im Callout-Widget (Selektor): nur der Inhalt
  * (`.callout-content`), wenn der Anker im Body beginnt, sonst das ganze Callout
@@ -129,22 +117,8 @@ export function locateInCallout<T extends { textContent: string | null }>(
   if (!target) return null;
   const root = rootOf(callout, target.scope);
   if (!root) return null;
-  const rendered = withoutWhitespace(root.textContent ?? "");
-  const k = nthIndexOf(rendered.text, target.visible, target.occurrence);
-  if (k < 0) return null;
-  return { root, start: rendered.offsets[k], end: rendered.offsets[k + target.visible.length - 1] + 1 };
-}
-
-function countOccurrences(haystack: string, needle: string): number {
-  let count = 0;
-  for (let k = haystack.indexOf(needle); k >= 0; k = haystack.indexOf(needle, k + 1)) count++;
-  return count;
-}
-
-function nthIndexOf(haystack: string, needle: string, n: number): number {
-  let k = haystack.indexOf(needle);
-  for (let i = 0; i < n && k >= 0; i++) k = haystack.indexOf(needle, k + 1);
-  return k;
+  const span = locateVisibleText(root.textContent ?? "", target.visible, target.occurrence);
+  return span && { root, ...span };
 }
 
 /** Findet das Callout-Widget, das im Bereich des Callout-Blocks beginnt. */

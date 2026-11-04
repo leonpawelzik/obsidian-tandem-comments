@@ -32,3 +32,43 @@ export function visibleText(md: string): string {
     .replace(/==(.+?)==/g, "$1") // ==hervorgehoben==
     .replace(/`([^`]+)`/g, "$1"); // `code`
 }
+
+/** Entfernt jeden Whitespace; `offsets[i]` ist die Position des i-ten verbliebenen Zeichens im Original. */
+export function withoutWhitespace(s: string): { text: string; offsets: number[] } {
+  let text = "";
+  const offsets: number[] = [];
+  for (let i = 0; i < s.length; i++) {
+    if (/\s/.test(s[i])) continue;
+    text += s[i];
+    offsets.push(i);
+  }
+  return { text, offsets };
+}
+
+export function countOccurrences(haystack: string, needle: string): number {
+  let count = 0;
+  for (let k = haystack.indexOf(needle); k >= 0; k = haystack.indexOf(needle, k + 1)) count++;
+  return count;
+}
+
+function nthIndexOf(haystack: string, needle: string, n: number): number {
+  let k = haystack.indexOf(needle);
+  for (let i = 0; i < n && k >= 0; i++) k = haystack.indexOf(needle, k + 1);
+  return k;
+}
+
+/**
+ * Sucht das `occurrence`-te Vorkommen (0-basiert) von `visible` in gerendertem
+ * Text, wobei Whitespace ignoriert wird (`visible` ist bereits ohne Whitespace).
+ * Liefert die Spanne im unveränderten `rendered`, passend für wrapRange.
+ */
+export function locateVisibleText(
+  rendered: string,
+  visible: string,
+  occurrence: number
+): { start: number; end: number } | null {
+  const { text, offsets } = withoutWhitespace(rendered);
+  const k = nthIndexOf(text, visible, occurrence);
+  if (k < 0) return null;
+  return { start: offsets[k], end: offsets[k + visible.length - 1] + 1 };
+}
