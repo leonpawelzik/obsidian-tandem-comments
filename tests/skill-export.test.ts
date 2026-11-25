@@ -34,6 +34,12 @@ describe("exported Claude skill edit-suggestion contract", () => {
     expect(SKILL_MARKDOWN).toContain("newline");
   });
 
+  it("explains anchors whose quote was deleted", () => {
+    const contract = SKILL_MARKDOWN.replace(/\s+/g, " ");
+    expect(contract).toContain("`anchor.orphaned: true` means the user deleted the quoted passage");
+    expect(contract).toContain("remove `orphaned` when you give the comment a new anchor");
+  });
+
   it("documents accepted and declined history outcomes", () => {
     expect(SKILL_MARKDOWN).toContain('suggestion.result: "accepted"');
     expect(SKILL_MARKDOWN).toContain('suggestion.result: "declined"');

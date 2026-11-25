@@ -5,13 +5,16 @@ import {
   changesTouchCommentBlock,
   isFullReplace,
   mapAnchors,
+  mapAnchorsPrecisely,
   mergePendingAnchors,
   shouldPreservePendingAnchors,
   type TrackedAnchor,
 } from "./reanchor";
+import { findInReplacement, findReturned, loseAnchor, textChanges, type LostAnchor } from "./lost-anchors";
 import { createDocumentReader, makeAnchor, normalizeTrailingChanges, parseDocument, resolveAnchor, serializeDocument } from "./store";
 import { findCallouts, type ParsedCallout } from "./callout-highlight";
 import { findTables, rangesTouchTable, type ParsedTable } from "./table-highlight";
+import type { ParsedDoc } from "./types";
 import { applyWidgetHighlights, clearWidgetHighlights } from "./widget-highlight";
 
 /** Markiert Transaktionen, die das Plugin selbst dispatcht (Block-Rewrite). */
@@ -19,6 +22,8 @@ export const selfEdit = Annotation.define<boolean>();
 
 const REANCHOR_DEBOUNCE_MS = 800;
 const NORMALIZE_DEBOUNCE_MS = 500;
+/** Kennzeichnung von Nutzer-Edits; externe Dateiänderungen meldet Obsidian als "set". */
+const USER_EVENTS = ["input", "delete", "move", "undo", "redo"];
 
 export interface AnchorSaveTarget {
   key: object;
@@ -81,6 +86,7 @@ function editorAnchorTrackerClass(plugin: EditorExtensionHost) {
       dirty = false;
       saveOnClose: AnchorSaveTarget | undefined;
       destroyed = false;
+      lost = new Map<string, LostAnchor>();
       timer: number | null = null;
       normalizeTimer: number | null = null;
       widgetDoc: EditorView["state"]["doc"] | null = null;
@@ -139,6 +145,7 @@ function editorAnchorTrackerClass(plugin: EditorExtensionHost) {
             if (after) this.saveOnClose.save(before, after);
           }
           this.saveOnClose = target;
+          this.lost.clear();
         }
         // Tabellen-Widgets entstehen/verschwinden auch bei Selektions- und
         // Viewport-Wechseln (Cursor rein/raus), nicht nur bei Doc-Änderungen.
@@ -166,8 +173,10 @@ function editorAnchorTrackerClass(plugin: EditorExtensionHost) {
           !isSelf && touchesBlock && preservePending
             ? mapAnchors(this.anchors, u.changes).filter((anchor) => anchor.to <= newProseLen)
             : [];
+        const before = this.anchors;
         if (isSelf || fullReplace || touchesBlock) {
           this.syncFromDoc(text);
+          if (!isSelf) this.keepPending(before, pending, u, oldDoc, newDoc, preservePending);
           if (pending.length > 0) {
             const doc = this.readDocument(text);
             if (!doc.error) {
@@ -195,31 +204,100 @@ function editorAnchorTrackerClass(plugin: EditorExtensionHost) {
             ranges.push({ from: fromB, to: toB });
           });
           const hasOpenComments = this.anchors.length > 0 || Object.values(newDoc.comments).some((comment) => comment.status === "open");
+          const { mapped, torn } = mapAnchorsPrecisely(this.anchors, u.changes, u.startState.doc);
           if (hasOpenComments && rangesTouchTable(text, newProseLen, ranges, this.widgetsFor(text, newProseLen).tables)) {
-            // Tabellen-Edit: Positionen durch die Änderung mappen (Anker folgen
-            // echten Text-Edits wie in Prosa). Anker, die bei Obsidians Tabellen-
-            // Neuformatierung (Ganz-Block-Replace) kollabieren, per exaktem Text
-            // wiederherstellen statt sie zu verlieren. performReanchor schreibt nur
-            // um, wenn der exact-Text wirklich weg ist — schützt vor Korruption.
-            const mapped = mapAnchors(this.anchors, u.changes);
-            const survived = new Set(mapped.map((a) => a.id));
-            this.anchors = mapped;
-            const doc = this.readDocument(text);
-            for (const [id, c] of Object.entries(doc.comments)) {
+            // Tabellen-Edit: Anker, die Obsidians Umbau (Zeilen sortieren, Spalten
+            // verschieben …) zerreißt oder löscht, per exaktem Text innerhalb des
+            // Geänderten wiederfinden statt sie zu verlieren.
+            const safe = mapped.filter((a) => !torn.has(a.id));
+            const guessed = new Map(mapped.filter((a) => torn.has(a.id)).map((a) => [a.id, a]));
+            const survived = new Set(safe.map((a) => a.id));
+            this.anchors = safe;
+            for (const [id, c] of Object.entries(newDoc.comments)) {
               if (c.status === "resolved" || survived.has(id)) continue;
-              const r = resolveAnchor(doc.prose, c.anchor);
-              if (r.kind === "resolved") this.anchors.push({ id, from: r.start, to: r.end });
+              const r = resolveAnchor(newDoc.prose, c.anchor);
+              const found = r.kind === "resolved" && ranges.some((range) => r.start >= range.from && r.end <= range.to);
+              const fallback = guessed.get(id);
+              if (found) this.anchors.push({ id, from: r.start, to: r.end });
+              else if (fallback) this.anchors.push(fallback);
             }
             this.anchors.sort((a, b) => a.from - b.from);
             this.dirty = true;
             this.scheduleReanchor();
           } else {
-            this.anchors = mapAnchors(this.anchors, u.changes);
+            this.anchors = mapped;
             this.dirty = this.anchors.length > 0;
             if (this.dirty) this.scheduleReanchor();
           }
+          this.followLost(before, u, oldDoc, newDoc);
         }
         this.decorations = this.anchors.length ? this.buildDecorations() : Decoration.none;
+      }
+
+      /** Merkt sich vom Nutzer gelöschte Zitate und holt zurückgekehrte wieder herein. */
+      followLost(before: TrackedAnchor[], u: ViewUpdate, oldDoc: ParsedDoc, newDoc: ParsedDoc): void {
+        const tracked = new Set(this.anchors.map((a) => a.id));
+        const gone = before.filter((a) => !tracked.has(a.id));
+        const away = Object.entries(newDoc.comments).filter(
+          ([id, c]) => c.status === "open" && !tracked.has(id) && (c.anchor.orphaned || this.lost.has(id))
+        );
+        if (gone.length === 0 && away.length === 0) return;
+        const changes = textChanges(u.changes);
+        const back: TrackedAnchor[] = [];
+        const byUser = u.transactions.some((tr) => USER_EVENTS.some((event) => tr.isUserEvent(event)));
+        for (const anchor of gone) {
+          const stored = newDoc.comments[anchor.id]?.anchor;
+          if (!stored) continue;
+          const oldText = u.startState.doc;
+          const found = findInReplacement(anchor, changes, oldText);
+          if (found) back.push({ id: anchor.id, ...found });
+          // Externe Änderungen ("set") können den Anker noch nachziehen, z.B. ein Agent.
+          else if (byUser) {
+            const lost = loseAnchor(anchor, stored, changes, oldText, oldDoc.prose);
+            const returned = findReturned(lost.anchor, lost, changes, newDoc.prose);
+            if (returned) back.push({ id: anchor.id, ...returned });
+            else this.lost.set(anchor.id, lost);
+          }
+        }
+        for (const [id, c] of away) {
+          const lost = this.lost.get(id);
+          const returned = findReturned(lost?.anchor ?? c.anchor, lost, changes, newDoc.prose);
+          if (returned) back.push({ id, ...returned });
+        }
+        for (const anchor of back) this.lost.delete(anchor.id);
+        this.anchors = [...this.anchors, ...back].sort((a, b) => a.from - b.from);
+        this.dirty = this.anchors.length > 0 || this.lost.size > 0;
+        if (this.dirty) this.scheduleReanchor();
+      }
+
+      /**
+       * Nach einem Block-Rewrite, bevor offene Änderungen gespeichert sind: Wer
+       * seinen gespeicherten Anker behalten hat, bleibt an der verfolgten Stelle
+       * bzw. gelöscht, auch wenn das alte Zitat anderswo vorkommt.
+       */
+      keepPending(
+        before: TrackedAnchor[],
+        pending: TrackedAnchor[],
+        u: ViewUpdate,
+        oldDoc: ParsedDoc,
+        newDoc: ParsedDoc,
+        preserve: boolean
+      ): void {
+        if (!preserve) this.lost.clear();
+        const unchanged = (id: string): boolean =>
+          newDoc.comments[id]?.status === "open" &&
+          JSON.stringify(newDoc.comments[id].anchor) === JSON.stringify(oldDoc.comments[id]?.anchor);
+        for (const id of [...this.lost.keys()]) if (!unchanged(id)) this.lost.delete(id);
+        const quotes = new Map(before.map((a) => [a.id, u.startState.doc.sliceString(a.from, a.to)]));
+        const keep = pending.filter((a) => unchanged(a.id) && quotes.get(a.id) === u.state.doc.sliceString(a.from, a.to));
+        const replaced = new Set([...keep.map((a) => a.id), ...this.lost.keys()]);
+        const synced = new Map(this.anchors.map((a) => [a.id, a]));
+        this.anchors = [...this.anchors.filter((a) => !replaced.has(a.id)), ...keep].sort((a, b) => a.from - b.from);
+        const moved = keep.some((a) => synced.get(a.id)?.from !== a.from || synced.get(a.id)?.to !== a.to);
+        if (moved || this.lost.size > 0) {
+          this.dirty = true;
+          this.scheduleReanchor();
+        }
       }
 
       buildDecorations(): DecorationSet {
@@ -315,15 +393,16 @@ function editorAnchorTrackerClass(plugin: EditorExtensionHost) {
           if (!c || c.status === "resolved") continue;
           if (t.to > doc.prose.length) continue;
           const cur = c.anchor;
-          // Nur umschreiben, wenn der bisherige exact-Text nicht mehr auffindbar
-          // ist (= echte Bearbeitung des Zitats). Ist er noch da, war die Änderung
-          // nur drumherum (z.B. Obsidians Tabellen-Neuformatierung) — ein Rewrite
-          // aus evtl. verschobenen Positionen würde den Anker korrumpieren.
-          if (cur.exact && doc.prose.includes(cur.exact)) continue;
+          // Nur umschreiben, wenn der gespeicherte Anker nicht mehr genau hierher
+          // führt — auch wenn sein Zitat anderswo noch vorkommt: sonst säße der
+          // Kommentar nach dem Neuöffnen an der anderen Stelle.
+          const stored = resolveAnchor(doc.prose, cur);
+          if (stored.kind === "resolved" && stored.start === t.from && stored.end === t.to) continue;
           const next = makeAnchor(doc.prose, t.from, t.to);
           if (
             next.exact &&
-            (next.exact !== cur.exact ||
+            (cur.orphaned ||
+              next.exact !== cur.exact ||
               next.prefix !== cur.prefix ||
               next.suffix !== cur.suffix ||
               next.pos !== cur.pos)
@@ -331,6 +410,12 @@ function editorAnchorTrackerClass(plugin: EditorExtensionHost) {
             c.anchor = next;
             changed = true;
           }
+        }
+        for (const [id, lost] of this.lost) {
+          const c = doc.comments[id];
+          if (!c || c.status === "resolved" || JSON.stringify(c.anchor) !== lost.stored) continue;
+          c.anchor = { ...lost.anchor, orphaned: true };
+          changed = true;
         }
         if (!changed) return;
         return serializeDocument(doc, plugin.settings.schemaHint);

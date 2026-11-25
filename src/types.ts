@@ -7,6 +7,8 @@ export interface Anchor {
   suffix?: string;
   /** Zeichen-Offset in der Prosa als Fallback bei Mehrdeutigkeit. */
   pos?: number;
+  /** Das Zitat wurde gelöscht; gleicher Text anderswo ist nicht gemeint. */
+  orphaned?: true;
 }
 
 export interface ThreadEntry {
