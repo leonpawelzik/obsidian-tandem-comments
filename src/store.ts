@@ -151,7 +151,7 @@ function contextMatches(prose: string, at: number, len: number, anchor: Anchor):
 
 export function resolveAnchor(prose: string, anchor: Anchor): AnchorResolution {
   const exact = anchor.exact;
-  if (!exact) return { kind: "orphaned" };
+  if (!exact || anchor.orphaned) return { kind: "orphaned" };
   // Search the more selective context first. A contextual hit is exactly a hit
   // that contextMatches would retain; uniqueness still has to be checked.
   // Missing/stale context falls back to the original quote-only semantics.

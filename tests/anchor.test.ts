@@ -8,6 +8,10 @@ describe("resolveAnchor", () => {
     expect(r).toEqual({ kind: "resolved", start: 22, end: 38 });
   });
 
+  it("does not match the same text elsewhere once the quote was deleted", () => {
+    expect(resolveAnchor("Preis senken.", { exact: "senken", orphaned: true })).toEqual({ kind: "orphaned" });
+  });
+
   it("disambiguates multiple matches via prefix/suffix", () => {
     const prose = "Preis senken. Kosten senken. Risiko senken.";
     const r = resolveAnchor(prose, { exact: "senken", prefix: "Kosten ", suffix: "." });

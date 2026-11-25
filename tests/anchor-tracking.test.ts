@@ -34,6 +34,23 @@ function replace(h: Harness, before: string, after: string) {
   h.apply({ changes: { from, to: from + before.length, insert: after }, userEvent: "input" });
 }
 
+/** Ein Nutzer-Edit mit CodeMirror-Kennzeichnung; externe Änderungen meldet Obsidian als "set". */
+function edit(h: Harness, userEvent: string, ...changes: { from: number; to?: number; insert?: string }[]) {
+  h.apply({ changes, userEvent });
+}
+
+/** Schreibt den Block neu, wie beim Hinzufügen eines Kommentars in der Sidebar. */
+function rewriteBlock(h: Harness, mutate: (comments: CommentMap) => void) {
+  const raw = h.view.state.doc.toString();
+  const doc = parseDocument(raw);
+  mutate(doc.comments);
+  h.apply({ changes: { from: doc.prose.length, to: raw.length, insert: serializeDocument(doc, true).slice(doc.prose.length) }, userEvent: "set" });
+}
+
+function stored(h: Harness, id: string) {
+  return parseDocument(h.view.state.doc.toString()).comments[id].anchor;
+}
+
 /** Wo der Kommentar gerade sitzt, mit etwas Text davor. */
 function live(h: Harness, id: string, context = 0): string | null {
   const anchor = h.tracker.anchors.find((a) => a.id === id);
@@ -136,5 +153,130 @@ describe("edits that must not move or rewrite a comment", () => {
     const h = open("Some plain cell.\n\nAnother plain word.\n", { c: ["plain"] });
     replace(h, "Some plain cell.", "Totally different.");
     expect(live(h, "c")).toBeNull();
+  });
+});
+
+describe("deleting a quote that also occurs elsewhere", () => {
+  const TEXT = "Some plain cell.\n\nAnother plain word.\n";
+  const deleted = () => {
+    const h = open(TEXT, { c: ["plain"] });
+    edit(h, "delete.selection", { from: 0, to: 16 });
+    return h;
+  };
+
+  it("orphans the comment instead of moving it", () => {
+    const h = deleted();
+    expect(reopened(h, "c")).toBeNull();
+    expect(stored(h, "c")).toMatchObject({ exact: "plain", orphaned: true });
+  });
+
+  it("orphans the comment when the quote is erased character by character", () => {
+    const h = open(TEXT, { c: ["plain"] });
+    for (let end = 10; end > 5; end--) edit(h, "delete.backward", { from: end - 1, to: end });
+    expect(reopened(h, "c")).toBeNull();
+    expect(stored(h, "c").exact).toBe("plain");
+  });
+
+  it("orphans a comment erased from a table cell", () => {
+    const h = open("| a | b |\n| - | - |\n| x | plain |\n\nAnother plain word.\n", { c: ["plain"] });
+    const from = nthIndexOf(h.view.state.doc.toString(), " plain |");
+    edit(h, "delete.backward", { from, to: from + 8, insert: "       |" });
+    expect(reopened(h, "c")).toBeNull();
+  });
+
+  it("brings the comment back on undo, also after it was saved as orphaned", () => {
+    const h = deleted();
+    h.tracker.performReanchor();
+    edit(h, "undo", { from: 0, insert: "Some plain cell." });
+    expect(live(h, "c", 5)).toBe("Some plain");
+    expect(reopened(h, "c", 5)).toBe("Some plain");
+    expect(stored(h, "c").orphaned).toBeUndefined();
+  });
+
+  it("brings the comment back on undo in a later session", () => {
+    const h = deleted();
+    h.tracker.performReanchor();
+    const later = new Harness(h.view.state.doc.toString());
+    edit(later, "input.paste", { from: 0, insert: "Some plain cell." });
+    expect(live(later, "c", 5)).toBe("Some plain");
+  });
+
+  it("follows cut and paste", () => {
+    const h = deleted();
+    h.tracker.performReanchor();
+    const end = nthIndexOf(h.view.state.doc.toString(), "Unrelated closing");
+    edit(h, "input.paste", { from: end, insert: "Some plain cell.\n" });
+    expect(reopened(h, "c", 5)).toBe("Some plain");
+  });
+
+  it("follows a moved line", () => {
+    const h = open("- one plain\n- two plain\n", { c: ["plain"] });
+    edit(h, "move.line", { from: 0, to: 12 }, { from: 24, insert: "- one plain\n" });
+    expect([live(h, "c", 6), reopened(h, "c", 6)]).toEqual(["- one plain", "- one plain"]);
+  });
+
+  it("follows the quote into a rewritten passage", () => {
+    const h = open(TEXT, { c: ["plain"] });
+    edit(h, "input", { from: 0, to: 16, insert: "It is a plain thing!" });
+    expect(reopened(h, "c", 5)).toBe("is a plain");
+  });
+
+  it("does not come back for other text", () => {
+    const h = deleted();
+    edit(h, "input.type", { from: 0, insert: "p" });
+    edit(h, "input.paste", { from: 0, insert: "A quite plain intro. " });
+    expect([live(h, "c"), reopened(h, "c")]).toEqual([null, null]);
+  });
+
+  it("does not mark comments when another app changes the file", () => {
+    const h = open(TEXT, { c: ["plain"] });
+    edit(h, "set", { from: 0, to: 16 });
+    h.tracker.performReanchor();
+    expect(h.dispatches).toHaveLength(0);
+  });
+});
+
+describe("a block rewrite before pending edits are saved", () => {
+  const TEXT = "Some plain cell.\n\nAnother plain word.\n";
+  const addComment = (h: Harness) => rewriteBlock(h, (comments) => {
+    comments.other = { anchor: { exact: "Unrelated" }, status: "open", thread: [] };
+  });
+
+  it("keeps the comment on the edited quote", () => {
+    const h = open(TEXT, { c: ["plain"] });
+    edit(h, "input.type", { from: 8, insert: "QQ" });
+    addComment(h);
+    expect(live(h, "c", 5)).toBe("Some plaQQin");
+    expect(reopened(h, "c", 5)).toBe("Some plaQQin");
+  });
+
+  it("keeps the comment orphaned when its quote was deleted", () => {
+    const h = open(TEXT, { c: ["plain"] });
+    edit(h, "delete.selection", { from: 0, to: 16 });
+    addComment(h);
+    expect(live(h, "c")).toBeNull();
+    expect(reopened(h, "c")).toBeNull();
+  });
+
+  it("lets an explicit re-anchoring win", () => {
+    const h = open(TEXT, { c: ["plain"] });
+    edit(h, "input.type", { from: 8, insert: "QQ" });
+    rewriteBlock(h, (comments) => {
+      const { prose } = parseDocument(h.view.state.doc.toString());
+      const from = prose.indexOf("word");
+      comments.c.anchor = makeAnchor(prose, from, from + 4);
+    });
+    expect([live(h, "c"), reopened(h, "c")]).toEqual(["word", "word"]);
+  });
+
+  it("lets an explicit re-anchoring win over a deletion", () => {
+    const h = open(TEXT, { c: ["plain"] });
+    edit(h, "delete.selection", { from: 0, to: 16 });
+    rewriteBlock(h, (comments) => {
+      const { prose } = parseDocument(h.view.state.doc.toString());
+      const from = prose.indexOf("word");
+      comments.c.anchor = makeAnchor(prose, from, from + 4);
+    });
+    expect([live(h, "c"), reopened(h, "c")]).toEqual(["word", "word"]);
   });
 });

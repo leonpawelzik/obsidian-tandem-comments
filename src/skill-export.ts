@@ -68,6 +68,10 @@ patching backticks with string replacement.
 - **Locating a passage:** search the prose for \`anchor.exact\`; on multiple hits
   disambiguate via \`prefix\`/\`suffix\`, falling back to the hit closest to \`pos\`
   (character offset into the prose).
+  \`anchor.orphaned: true\` means the user deleted the quoted passage: the same
+  text elsewhere is not meant, so do not attach the comment there. Treat it as an
+  anchor you cannot locate, and remove \`orphaned\` when you give the comment a
+  new anchor.
 - **Replying:** append \`{ "author": "<your name>", "ts": "<ISO-8601 UTC>", "text": "..." }\`
   to the \`thread\` array. Use your own assistant name as author (e.g. \`"Claude"\`,
   \`"Codex"\`), never the name of a human reviewer.
