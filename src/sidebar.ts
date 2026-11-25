@@ -26,6 +26,8 @@ import {
   declineSuggestion,
   editThreadEntry,
   generateId,
+  isNoteAnchor,
+  noteAnchor,
   removeComment,
   removeThreadEntry,
   resolveAll,
@@ -51,6 +53,13 @@ interface Draft {
 
 function truncate(s: string, n: number): string {
   return s.length <= n ? s : s.slice(0, n - 1) + "…";
+}
+
+/** Kopfzeile einer Karte: das Zitat oder der Hinweis, dass die ganze Notiz gemeint ist. */
+function quoteLabel(anchor: Anchor): { text: string; cls: string } {
+  return isNoteAnchor(anchor)
+    ? { text: "Whole note", cls: "tc-quote tc-quote-note" }
+    : { text: `"${truncate(anchor.exact, 80)}"`, cls: "tc-quote" };
 }
 
 /** Colors an author name span with accessible light and dark variants. */
@@ -267,6 +276,18 @@ export class CommentSidebar extends ItemView implements HoverParent {
 
     const header = container.createDiv({ cls: "tc-header" });
     header.createSpan({ text: "Comments", cls: "tc-title" });
+    const addBtn = header.createEl("button", {
+      cls: "tc-header-action clickable-icon",
+      attr: { "aria-label": "Comment on note" },
+    });
+    setIcon(addBtn, "message-square-plus");
+    setTooltip(addBtn, "Comment on note");
+    addBtn.onclick = () => {
+      // Einen angefangenen Entwurf nicht überschreiben.
+      const pending = live.querySelector<HTMLTextAreaElement>(".tc-draft textarea");
+      if (pending?.value) pending.focus();
+      else this.startDraft(file, noteAnchor());
+    };
     const toggle = header.createEl("button", {
       text: this.showResolved ? "Hide resolved" : "Show resolved",
       cls: "tc-toggle",
@@ -283,7 +304,7 @@ export class CommentSidebar extends ItemView implements HoverParent {
     );
     const all = resolveAll(doc.prose, visibleComments);
     const open = this.sortComments(
-      all.filter((r) => r.comment.status === "open" && r.resolution.kind === "resolved")
+      all.filter((r) => r.comment.status === "open" && r.resolution.kind !== "orphaned")
     );
     const orphans = this.sortComments(
       all.filter((r) => r.comment.status === "open" && r.resolution.kind === "orphaned")
@@ -334,7 +355,7 @@ export class CommentSidebar extends ItemView implements HoverParent {
     const draft = this.draft;
     if (!draft) return;
     const card = container.createDiv({ cls: "tc-card tc-draft" });
-    card.createDiv({ text: `"${truncate(draft.anchor.exact, 80)}"`, cls: "tc-quote" });
+    card.createDiv(quoteLabel(draft.anchor));
     if (draft.kind === "suggestion") {
       this.renderSuggestionDraft(card, file, draft);
       return;
@@ -615,7 +636,7 @@ export class CommentSidebar extends ItemView implements HoverParent {
         });
       }
     } else {
-      const quote = card.createDiv({ text: `"${truncate(r.comment.anchor.exact, 80)}"`, cls: "tc-quote" });
+      const quote = card.createDiv(quoteLabel(r.comment.anchor));
       if (r.resolution.kind === "resolved") {
         quote.addClass("tc-quote-link");
         quote.onclick = () => this.plugin.revealAnchor(file, r.comment.anchor);

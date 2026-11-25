@@ -30,6 +30,7 @@ import { commitSuggestionAcceptance } from "./suggestion-editor";
 import {
   type SuggestionAcceptancePlan,
   makeAnchor,
+  noteAnchor,
   parseDocument,
   planSuggestionAcceptance,
   resolveAll,
@@ -78,6 +79,12 @@ export default class CommentsPlugin extends Plugin {
       name: "Add comment",
       icon: "message-square-plus",
       editorCallback: (editor) => this.addCommentFromSelection(editor),
+    });
+    this.addCommand({
+      id: "add-note-comment",
+      name: "Add comment to note",
+      icon: "message-square-text",
+      callback: () => this.addNoteComment(),
     });
     this.addCommand({
       id: "suggest-edit",
@@ -351,9 +358,23 @@ export default class CommentsPlugin extends Plugin {
     new Notice("Review threads exported to " + path);
   }
 
+  /** Kommentar zur ganzen Notiz; braucht weder Auswahl noch Editor (Reading View). */
+  addNoteComment(): void {
+    const file = this.app.workspace.getActiveFile();
+    if (!file || file.extension !== "md") {
+      new Notice("No active Markdown file.");
+      return;
+    }
+    void this.openSidebar().then((view) => view?.startDraft(file, noteAnchor()));
+  }
+
   addCommentFromSelection(editor: Editor): void {
     const file = this.app.workspace.getActiveFile();
     if (!file) return;
+    if (!editor.somethingSelected()) {
+      this.addNoteComment();
+      return;
+    }
     const anchor = this.anchorFromSelection(editor);
     if (!anchor) return;
     void this.openSidebar().then((view) => view?.startDraft(file, anchor));

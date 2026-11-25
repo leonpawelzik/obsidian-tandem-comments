@@ -67,6 +67,15 @@ describe("sidebar refresh contracts", () => {
     expect(h.container.cards).toHaveLength(8);
   });
 
+  it("shows comments on the whole note first and orphans last", async () => {
+    const h = sidebarHarness(), doc = fixture(4_000, 2);
+    doc.comments.orphan = { anchor: { exact: "not in the text" }, status: "open", thread: [] };
+    doc.comments.note = { anchor: { exact: "", scope: "note" }, status: "open", thread: [] };
+    h.plugin.readDoc.mockResolvedValue(doc);
+    await h.sidebar.render();
+    expect(h.container.cards.map((card) => card.label)).toEqual(["A.md:note", "A.md:c0", "A.md:c1", "A.md:orphan"]);
+  });
+
   it("discards stale overlapping reads without duplicate cards", async () => {
     const h = sidebarHarness(), doc = fixture(4_000, 8), slow = deferred<typeof doc>();
     h.plugin.readDoc.mockReturnValueOnce(slow.promise).mockResolvedValue(doc);

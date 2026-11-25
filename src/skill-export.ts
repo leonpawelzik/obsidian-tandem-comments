@@ -12,7 +12,7 @@ stays **100% untouched** — never write markers into the body text.
 ~~~markdown
 \`\`\`tandem-comments
 // Schema: { "<id>": { anchor:{exact,prefix,suffix,pos?}, status:open|resolved, thread:[{author,ts,text}], suggestion?:{replacement,author,ts,result?} } }
-// Anchor = quote from the prose. To locate: search for "exact", disambiguate via prefix/suffix.
+// Anchor = quote from the prose. To locate: search for "exact", disambiguate via prefix/suffix. scope "note" = comment on the whole note, no quote.
 // Addressing comments: handle every open id. After acting, append a reply {author: your name, ts, text} to its thread, and if you edited the quoted text, update its anchor to the new wording.
 {
   "a1f3": {
@@ -68,6 +68,10 @@ patching backticks with string replacement.
 - **Locating a passage:** search the prose for \`anchor.exact\`; on multiple hits
   disambiguate via \`prefix\`/\`suffix\`, falling back to the hit closest to \`pos\`
   (character offset into the prose).
+  \`"anchor": { "exact": "", "scope": "note" }\` is a comment on the whole note. It
+  has no passage, so it is not an anchor you cannot locate: read it as feedback on
+  the entire text, keep its anchor as it is, and use this form for your own
+  comments that concern the note as a whole.
   \`anchor.orphaned: true\` means the user deleted the quoted passage: the same
   text elsewhere is not meant, so do not attach the comment there. Treat it as an
   anchor you cannot locate, and remove \`orphaned\` when you give the comment a

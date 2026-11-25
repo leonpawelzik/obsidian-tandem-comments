@@ -39,7 +39,7 @@ Your note text. We should cut prices hard in Q3.
 
 ```tandem-comments
 // Schema: { "<id>": { anchor:{exact,prefix,suffix,pos?}, status:open|resolved, thread:[{author,ts,text}], suggestion?:{replacement,author,ts,result?} } }
-// Anchor = quote from the prose. To locate: search for "exact", disambiguate via prefix/suffix.
+// Anchor = quote from the prose. To locate: search for "exact", disambiguate via prefix/suffix. scope "note" = comment on the whole note, no quote.
 // Addressing comments: handle every open id. After acting, append a reply {author: your name, ts, text} to its thread, and if you edited the quoted text, update its anchor to the new wording.
 {
   "a1f3": {
@@ -61,6 +61,8 @@ Each comment is anchored by a quote ([W3C TextQuoteSelector](https://www.w3.org/
 2. Run **Add comment** or **Suggest edit** (command palette, right-click, or mobile toolbar)
 3. Use the sidebar to discuss comments or accept and decline proposed replacements
 
+To comment on the whole note, run **Add comment** without a selection, or use the comment icon in the sidebar header. These threads have no quote and are not highlighted in the text.
+
 ### In the sidebar
 
 - **Reply** in the box under each thread. Send with Cmd/Ctrl+Enter or Enter, depending on your settings
@@ -74,7 +76,8 @@ Each comment is anchored by a quote ([W3C TextQuoteSelector](https://www.w3.org/
 
 | Command | What it does |
 |---|---|
-| Add comment | Start a comment on the current selection |
+| Add comment | Start a comment on the current selection, or on the whole note if nothing is selected |
+| Add comment to note | Start a comment on the whole note (also in Reading View) |
 | Suggest edit | Propose a replacement for the current selection |
 | Open comment sidebar | Show the review threads of the active note |
 | Toggle resolved threads | Show or hide resolved threads in the sidebar |

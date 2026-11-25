@@ -26,16 +26,24 @@ function activityTimestamp(item: ResolvedComment): number {
   );
 }
 
+/** Kommentare zur ganzen Notiz stehen vor, verwaiste nach allen Textstellen. */
+export function documentPosition(item: ResolvedComment): number {
+  switch (item.resolution.kind) {
+    case "note":
+      return -1;
+    case "resolved":
+      return item.resolution.start;
+    case "orphaned":
+      return Number.MAX_SAFE_INTEGER;
+  }
+}
+
 export function sortSidebarComments(
   items: ResolvedComment[],
   order: SidebarSortOrder
 ): ResolvedComment[] {
   if (order === "document") {
-    return [...items].sort(
-      (a, b) =>
-        (a.resolution.kind === "resolved" ? a.resolution.start : Number.MAX_SAFE_INTEGER) -
-        (b.resolution.kind === "resolved" ? b.resolution.start : Number.MAX_SAFE_INTEGER)
-    );
+    return [...items].sort((a, b) => documentPosition(a) - documentPosition(b));
   }
   const direction = order === "newest" ? -1 : 1;
   return [...items].sort((a, b) => direction * (activityTimestamp(a) - activityTimestamp(b)));
