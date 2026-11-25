@@ -81,6 +81,47 @@ export function findBlockRange(raw: string): { from: number; to: number } | null
   return match ? { from: match.from, to: match.to } : null;
 }
 
+function isCommentEntry(value: unknown): boolean {
+  if (typeof value !== "object" || value === null) return false;
+  const { anchor, thread } = value as Record<string, unknown>;
+  return typeof anchor === "object" && anchor !== null && Array.isArray(thread);
+}
+
+/**
+ * Kommentare in weiteren Blöcken vor dem letzten. Hängt ein Tool einen zweiten
+ * Block an, zeigt die Sidebar nur noch diesen (Issue #21). Beispiele innerhalb
+ * anderer Codeblöcke zählen nicht. prose ist die aus parseDocument.
+ */
+export function countHiddenComments(prose: string): number {
+  if (!prose.includes(FENCE_OPEN + "\n")) return 0;
+  let count = 0;
+  let fence = "";
+  let body: string[] | null = null;
+  for (const line of prose.split("\n")) {
+    const marker = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(line);
+    if (!fence) {
+      if (!marker) continue;
+      fence = marker[1];
+      body = line === FENCE_OPEN ? [] : null;
+    } else if (marker && marker[2].trim() === "" && marker[1].startsWith(fence)) {
+      if (body) count += countEntries(body.join("\n"));
+      fence = "";
+      body = null;
+    } else {
+      body?.push(line);
+    }
+  }
+  return count;
+}
+
+function countEntries(body: string): number {
+  try {
+    return Object.values(parseBlockBody(body)).filter(isCommentEntry).length;
+  } catch {
+    return 0;
+  }
+}
+
 export function parseDocument(raw: string): ParsedDoc {
   const blk = findBlock(raw);
   if (!blk) return { prose: raw, comments: {} };

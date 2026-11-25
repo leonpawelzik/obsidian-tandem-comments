@@ -31,7 +31,10 @@ class Container {
   removeClass(cls: string) { this.classes.delete(cls); }
   scrollIntoView() {}
   querySelector() { return this.editing ? {} : null; }
-  createDiv() { const node = new Container(); this.insertBefore(node, null); return node; }
+  text = "";
+  createDiv(options?: { text?: string }) {
+    const node = new Container(); node.text = options?.text ?? ""; this.insertBefore(node, null); return node;
+  }
   createSpan() { return {}; } createEl() { return {}; }
   insertBefore(node: Container, cursor: Container | null) {
     node.parent?.removeChild(node);
@@ -74,6 +77,23 @@ describe("sidebar refresh contracts", () => {
     h.plugin.readDoc.mockResolvedValue(doc);
     await h.sidebar.render();
     expect(h.container.cards.map((card) => card.label)).toEqual(["A.md:note", "A.md:c0", "A.md:c1", "A.md:orphan"]);
+  });
+
+  it("warns about comments in other blocks until they are merged", async () => {
+    const h = sidebarHarness(), doc = fixture(4_000, 2);
+    const block = (ids: string[]) => "\n```tandem-comments\n" + JSON.stringify(Object.fromEntries(
+      ids.map((id) => [id, { anchor: { exact: "x" }, status: "open", thread: [] }]))) + "\n```\n";
+    const warnings = () => h.container.children.map((node) => node.text).filter((text) => text.includes("more than one comment block"));
+    h.plugin.readDoc.mockResolvedValue({ ...doc, prose: doc.prose + block(["p"]) });
+    await h.sidebar.render();
+    expect(warnings()).toEqual(["This note has more than one comment block. Only the last one is shown, 1 comment in the others is hidden. Merge the blocks to see it."]);
+    expect(h.container.cards).toHaveLength(2);
+    h.plugin.readDoc.mockResolvedValue({ ...doc, prose: doc.prose + block(["p", "q"]) + block(["r"]) });
+    await h.sidebar.render();
+    expect(warnings()).toEqual(["This note has more than one comment block. Only the last one is shown, 3 comments in the others are hidden. Merge the blocks to see them."]);
+    h.plugin.readDoc.mockResolvedValue(doc);
+    await h.sidebar.render();
+    expect(warnings()).toEqual([]);
   });
 
   it("discards stale overlapping reads without duplicate cards", async () => {
