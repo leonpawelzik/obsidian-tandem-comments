@@ -23,6 +23,22 @@
   margin-bottom: 10px;
 }
 
+.tc-picked {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px;
+  margin-bottom: 10px;
+}
+
+.tc-picked-link {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-accent);
+}
+
 .tc-title {
   font-weight: 600;
   margin-right: auto;

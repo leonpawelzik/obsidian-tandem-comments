@@ -61,7 +61,7 @@ Each comment is anchored by a quote ([W3C TextQuoteSelector](https://www.w3.org/
 2. Run **Add comment** or **Suggest edit** (command palette, right-click, or mobile toolbar)
 3. Use the sidebar to discuss comments or accept and decline proposed replacements
 
-To comment on the whole note, run **Add comment** without a selection, or use the comment icon in the sidebar header. These threads have no quote and are not highlighted in the text.
+To comment on the whole note, run **Add comment** without a selection, or use the comment icon in the sidebar header. These threads have no quote and are not highlighted in the text. **Comment on note** in a note's context menu opens its threads in the sidebar without opening the note, for example on a Kanban card.
 
 ### In the sidebar
 

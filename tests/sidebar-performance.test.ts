@@ -143,3 +143,69 @@ describe("sidebar refresh contracts", () => {
   });
 
 });
+
+describe("sidebar on a picked note", () => {
+  const picked = { path: "Card.md", extension: "md", basename: "Card" } as never;
+  async function pickedHarness() {
+    const h = sidebarHarness();
+    h.plugin.readDoc.mockResolvedValue(fixture(4_000, 2));
+    h.sidebar.showNote(picked);
+    await h.sidebar.render();
+    return h;
+  }
+  const paths = (h: ReturnType<typeof sidebarHarness>) => new Set(h.container.cards.map((card) => card.label.split(":")[0]));
+
+  it("shows the picked note instead of the active file", async () => {
+    const h = await pickedHarness();
+    expect(paths(h)).toEqual(new Set(["Card.md"]));
+    expect(h.sidebar.shownFile()).toBe(picked);
+  });
+
+  it("keeps showing it across refreshes", async () => {
+    const h = await pickedHarness();
+    await h.sidebar.render();
+    await h.sidebar.render();
+    expect(paths(h)).toEqual(new Set(["Card.md"]));
+    expect(h.renderCard).toHaveBeenCalledTimes(2);
+  });
+
+  it("returns to the active note", async () => {
+    const h = await pickedHarness();
+    h.sidebar.followActive();
+    await h.sidebar.render();
+    expect(paths(h)).toEqual(new Set(["A.md"]));
+  });
+
+  it("returns to the active note when the picked one is deleted", async () => {
+    const h = await pickedHarness();
+    h.sidebar.noteDeleted({ path: "Other.md" } as never);
+    expect(h.sidebar.shownFile()).toBe(picked);
+    h.sidebar.noteDeleted(picked);
+    await h.sidebar.render();
+    expect(paths(h)).toEqual(new Set(["A.md"]));
+  });
+
+  it.each(["startDraft", "startSuggestionDraft"] as const)("shows the note a %s belongs to", async (start) => {
+    const h = await pickedHarness();
+    Object.assign(h.sidebar, { renderDraft: vi.fn() });
+    h.sidebar[start]({ path: "A.md", extension: "md" } as never, { exact: "target" });
+    await h.sidebar.render();
+    expect(paths(h)).toEqual(new Set(["A.md"]));
+  });
+
+  it("returns to the active note when one of its highlights is clicked", async () => {
+    const h = await pickedHarness();
+    h.sidebar.focusComment("c0");
+    await h.sidebar.render();
+    expect(paths(h)).toEqual(new Set(["A.md"]));
+  });
+
+  it("does not pick the note that is active anyway", async () => {
+    const h = sidebarHarness();
+    h.plugin.readDoc.mockResolvedValue(fixture(4_000, 2));
+    h.sidebar.showNote({ path: "A.md", extension: "md", basename: "A" } as never);
+    h.switchFile();
+    await h.sidebar.render();
+    expect(paths(h)).toEqual(new Set(["B.md"]));
+  });
+});
