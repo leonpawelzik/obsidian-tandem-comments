@@ -24,6 +24,7 @@ import {
   addComment,
   addReply,
   addSuggestion,
+  countHiddenComments,
   declineSuggestion,
   editThreadEntry,
   generateId,
@@ -333,6 +334,15 @@ export class CommentSidebar extends ItemView implements HoverParent {
     exportBtn.onclick = () => void this.plugin.exportComments(file);
 
     if (this.picked) this.renderPicked(container, this.picked);
+
+    const hidden = countHiddenComments(doc.prose);
+    if (hidden) {
+      const [count, pronoun] = hidden === 1 ? ["1 comment in the others is", "it"] : [`${hidden} comments in the others are`, "them"];
+      container.createDiv({
+        text: `This note has more than one comment block. Only the last one is shown, ${count} hidden. Merge the blocks to see ${pronoun}.`,
+        cls: "tc-warning",
+      });
+    }
 
     if (this.draft && this.draft.filePath === file.path) this.renderDraft(container, file);
     else this.draft = null;
