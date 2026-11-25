@@ -1,5 +1,7 @@
 import type { EditorView } from "@codemirror/view";
+import { countOccurrences, locateVisibleText, splitLines, visibleText, withoutWhitespace, type Line } from "./markdown-text";
 import type { TrackedAnchor } from "./reanchor";
+import type { HighlightTarget } from "./types";
 
 /**
  * Live-Preview rendert Tabellen als Widget (ersetzt den Quelltext durch ein
@@ -27,21 +29,6 @@ export interface ParsedTable {
 
 /** Delimiter-Zeile einer GFM-Tabelle, z.B. `| --- | :--: |`. */
 const DELIMITER = /^\s*\|?\s*:?-{1,}:?\s*(\|\s*:?-{1,}:?\s*)*\|?\s*$/;
-
-interface Line {
-  text: string;
-  from: number;
-}
-
-function splitLines(text: string, limit: number): Line[] {
-  const lines: Line[] = [];
-  let from = 0;
-  for (const part of text.slice(0, limit).split("\n")) {
-    lines.push({ text: part, from });
-    from += part.length + 1; // +1 für das entfernte "\n"
-  }
-  return lines;
-}
 
 /**
  * Zerlegt eine Tabellenzeile in Zell-Inhaltsspannen (Offsets relativ zum Dok).
@@ -129,24 +116,6 @@ export function locateCell(table: ParsedTable, pos: number): Cell | null {
   return null;
 }
 
-/**
- * Sichtbarer Text einer Inline-Markdown-Spanne — Syntax wird entfernt, sodass
- * er dem gerenderten textContent der Zelle entspricht (z.B. `**Preis**` → `Preis`).
- * Der Anker-`exact` stammt aus dem Quelltext (mit Syntax); im Tabellen-DOM steht
- * aber nur der gerenderte Text, daher muss danach gesucht werden.
- */
-export function visibleText(md: string): string {
-  return md
-    .replace(/\[\[([^\]|]+)\|([^\]]+)\]\]/g, "$2") // [[Ziel|Alias]] → Alias
-    .replace(/\[\[([^\]]+)\]\]/g, "$1") // [[Ziel]] → Ziel
-    .replace(/!?\[([^\]]*)\]\([^)]*\)/g, "$1") // [Label](url) / ![alt](url) → Label
-    .replace(/(\*\*|__)(.+?)\1/g, "$2") // **fett** / __fett__
-    .replace(/(\*|_)(.+?)\1/g, "$2") // *kursiv* / _kursiv_
-    .replace(/~~(.+?)~~/g, "$1") // ~~durchgestrichen~~
-    .replace(/==(.+?)==/g, "$1") // ==hervorgehoben==
-    .replace(/`([^`]+)`/g, "$1"); // `code`
-}
-
 /** Findet das DOM-<table>, dessen Quell-Position im Bereich des Tabellenblocks liegt. */
 function findDomTable(view: EditorView, table: ParsedTable, tables: HTMLTableElement[]): HTMLTableElement | null {
   for (const el of tables) {
@@ -171,131 +140,51 @@ function domCell(domTable: HTMLTableElement, cell: Cell): HTMLTableCellElement |
   return (body?.rows[cell.row - 2]?.cells[cell.col] as HTMLTableCellElement) ?? null;
 }
 
-/** Umschließt [start, start+len) im Element mit <span class="tc-highlight">, über Textknoten hinweg. */
-function wrapRange(
-  root: HTMLElement,
-  start: number,
-  len: number,
-  id: string,
-  onClick: (id: string) => void
-): boolean {
-  const doc = root.ownerDocument;
-  const end = start + len;
-  const walker = doc.createTreeWalker(root, NodeFilter.SHOW_TEXT);
-  const targets: { node: Text; s: number; e: number }[] = [];
-  let pos = 0;
-  let n: Node | null;
-  while ((n = walker.nextNode())) {
-    const node = n as Text;
-    const nodeLen = node.nodeValue?.length ?? 0;
-    const nodeStart = pos;
-    const nodeEnd = pos + nodeLen;
-    if (nodeEnd > start && nodeStart < end) {
-      targets.push({ node, s: Math.max(0, start - nodeStart), e: Math.min(nodeLen, end - nodeStart) });
-    }
-    pos = nodeEnd;
-    if (pos >= end) break;
-  }
-  if (targets.length === 0) return false;
-  for (const t of targets) {
-    const range = doc.createRange();
-    range.setStart(t.node, t.s);
-    range.setEnd(t.node, t.e);
-    const span = doc.createElement("span");
-    span.className = "tc-highlight";
-    span.dataset.tcId = id;
-    span.dataset.tcTable = "1";
-    // CM-eventHandlers greifen nicht im Widget-DOM der Tabelle — Listener direkt
-    // am Span setzen. Das Event wird abgefangen, damit das Tabellen-Widget NICHT
-    // in den interaktiven Edit-Modus springt: dort würde der Highlight
-    // verschwinden (CM-mark-Dekorationen rendern im Tabellen-Editor nicht).
-    // Zum Editieren woanders in die Zelle klicken.
-    const swallow = (e: Event) => {
-      e.preventDefault();
-      e.stopImmediatePropagation();
-    };
-    span.addEventListener("pointerdown", (e) => {
-      swallow(e);
-      onClick(id);
-    });
-    span.addEventListener("mousedown", swallow);
-    span.addEventListener("click", swallow);
-    try {
-      range.surroundContents(span);
-    } catch {
-      return false;
-    }
-  }
-  return true;
-}
-
-interface HighlightSnapshot {
-  signature: string;
-  tables: HTMLTableElement[];
-  contents: string[];
-  spans: Element[];
-}
-const highlightedViews = new WeakMap<EditorView, HighlightSnapshot>();
-
-/** Remove injected highlights when their anchors or table widgets change. */
-export function clearTableHighlights(view: EditorView): void {
-  highlightedViews.delete(view);
-  view.contentDOM.querySelectorAll<HTMLElement>("span.tc-highlight[data-tc-table]").forEach((span) => {
-    const parent = span.parentNode;
-    if (!parent) return;
-    while (span.firstChild) parent.insertBefore(span.firstChild, span);
-    parent.removeChild(span);
-    parent.normalize();
-  });
+/**
+ * Findet die Stelle des Ankers [from, to) in der gerenderten Tabellenzelle: das
+ * Element, das `cellOf` für Tabelle und Zelle liefert, und die Spanne in dessen
+ * textContent (passend für wrapRange). Der DOM-Zugriff steckt komplett in
+ * `cellOf`, damit sich die Logik ohne DOM testen lässt.
+ */
+export function locateInTable<T extends { textContent: string | null }>(
+  text: string,
+  tables: ParsedTable[],
+  from: number,
+  to: number,
+  cellOf: (table: ParsedTable, cell: Cell) => T | null
+): { root: T; start: number; end: number } | null {
+  const table = tables.find((t) => from >= t.from && to <= t.to);
+  if (!table) return null;
+  const cell = locateCell(table, from);
+  if (!cell) return null;
+  // Quell-Offsets passen nicht zum gerenderten Zelltext: Inline-Markdown
+  // (**fett**, [Label](url) …) wird gerendert weggekürzt, und Syntax *vor*
+  // dem Anker verschiebt den Offset. Daher im gerenderten Text nach dem
+  // sichtbaren Text suchen statt zu rechnen — und zwar nach dem Vorkommen,
+  // das der Anker in der Zelle ist, damit ein wiederholtes Wort an der
+  // richtigen Stelle markiert wird.
+  const visible = withoutWhitespace(visibleText(text.slice(from, to))).text;
+  if (!visible) return null;
+  const root = cellOf(table, cell);
+  if (!root) return null;
+  const before = withoutWhitespace(visibleText(text.slice(cell.from, from))).text;
+  const span = locateVisibleText(root.textContent ?? "", visible, countOccurrences(before, visible));
+  return span && { root, ...span };
 }
 
 /**
- * Setzt für jeden Anker, der in einer (als Widget gerenderten) Tabelle liegt,
- * den Highlight direkt im Tabellen-DOM. Idempotent: räumt vorher auf.
+ * Wo im gerenderten Tabellen-DOM der Anker markiert wird, oder null, wenn er
+ * nicht in einer Tabellenzelle liegt.
  */
-export function applyTableHighlights(
+export function locateTableHighlight(
   view: EditorView,
-  anchors: TrackedAnchor[],
+  anchor: TrackedAnchor,
   text: string,
-  proseLen: number,
-  onClick: (id: string) => void,
-  tables: ParsedTable[] = findTables(text, proseLen)
-): void {
-  const domTables = Array.from(view.contentDOM.querySelectorAll<HTMLTableElement>("table"));
-  const signature = JSON.stringify(anchors.map((a) => [a.id, a.from, a.to, text.slice(a.from, a.to)]));
-  const previous = highlightedViews.get(view);
-  const spans = Array.from(view.contentDOM.querySelectorAll("span.tc-highlight[data-tc-table]"));
-  if (previous && previous.signature === signature &&
-      previous.tables.length === domTables.length &&
-      domTables.every((table, i) => table === previous.tables[i] && table.innerHTML === previous.contents[i]) &&
-      spans.length === previous.spans.length && spans.every((span, i) => span === previous.spans[i])) return;
-  clearTableHighlights(view);
-  if (tables.length === 0) return;
-  for (const a of anchors) {
-    // Pro Anker absichern, damit ein Sonderfall nicht die übrigen Highlights killt.
-    try {
-      const table = tables.find((t) => a.from >= t.from && a.to <= t.to);
-      if (!table) continue;
-      const cell = locateCell(table, a.from);
-      if (!cell) continue;
-      const domTable = findDomTable(view, table, domTables);
-      if (!domTable) continue;
-      const cellEl = domCell(domTable, cell);
-      if (!cellEl) continue;
-      // Quell-Offsets passen nicht zum gerenderten Zelltext: Inline-Markdown
-      // (**fett**, [Label](url) …) wird gerendert weggekürzt, und Syntax *vor*
-      // dem Anker verschiebt den Offset. Daher im gerenderten Text nach dem
-      // sichtbaren Text suchen statt zu rechnen.
-      const visible = visibleText(text.slice(a.from, a.to));
-      if (!visible) continue;
-      const k = cellEl.textContent?.indexOf(visible) ?? -1;
-      if (k >= 0) wrapRange(cellEl, k, visible.length, a.id, onClick);
-    } catch {
-      // ignorieren — dieser Anker wird in diesem Durchlauf einfach nicht markiert.
-    }
-  }
-  highlightedViews.set(view, { signature, tables: domTables,
-    contents: domTables.map((table) => table.innerHTML),
-    spans: Array.from(view.contentDOM.querySelectorAll("span.tc-highlight[data-tc-table]")),
+  tables: ParsedTable[],
+  domTables: HTMLTableElement[]
+): HighlightTarget | null {
+  return locateInTable(text, tables, anchor.from, anchor.to, (table, cell) => {
+    const domTable = findDomTable(view, table, domTables);
+    return domTable && domCell(domTable, cell);
   });
 }
