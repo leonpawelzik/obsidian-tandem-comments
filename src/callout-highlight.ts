@@ -72,16 +72,16 @@ export type CalloutScope = ".callout-content" | ".callout";
 
 /**
  * Wonach im gerenderten Callout für den Anker [from, to) gesucht wird: sein
- * sichtbarer Text (ohne Whitespace), wie oft dieser Text davor im durchsuchten
+ * sichtbarer Text (ohne Whitespace) und wie oft dieser Text davor im durchsuchten
  * Bereich vorkommt — damit eine wiederholte Phrase an der richtigen Stelle
- * markiert wird — und welcher Bereich durchsucht wird.
+ * markiert wird.
  */
 function calloutTarget(
   text: string,
   callout: ParsedCallout,
   from: number,
   to: number
-): { visible: string; occurrence: number; scope: CalloutScope } | null {
+): { visible: string; occurrence: number } | null {
   // Der `> [!type]`-Marker selbst wird nicht gerendert — dort gibt es nichts zu markieren.
   const markerEnd = callout.from + (CALLOUT_START.exec(text.slice(callout.from, callout.to))?.[0].length ?? 0);
   if (from < markerEnd) return null;
@@ -94,7 +94,7 @@ function calloutTarget(
   const before = inBody
     ? calloutVisibleText(text.slice(callout.bodyFrom, from), true)
     : calloutVisibleText(text.slice(callout.from, from), true, true);
-  return { visible, occurrence: countOccurrences(before, visible), scope: inBody ? ".callout-content" : ".callout" };
+  return { visible, occurrence: countOccurrences(before, visible) };
 }
 
 /**
@@ -113,10 +113,11 @@ export function locateInCallout<T extends { textContent: string | null }>(
 ): { root: T; start: number; end: number } | null {
   const callout = callouts.find((c) => from >= c.from && to <= c.to);
   if (!callout) return null;
+  // Erst das DOM: Für nicht gerenderte Callouts entfällt die teure Textsuche.
+  const root = rootOf(callout, from >= callout.bodyFrom ? ".callout-content" : ".callout");
+  if (!root) return null;
   const target = calloutTarget(text, callout, from, to);
   if (!target) return null;
-  const root = rootOf(callout, target.scope);
-  if (!root) return null;
   const span = locateVisibleText(root.textContent ?? "", target.visible, target.occurrence);
   return span && { root, ...span };
 }

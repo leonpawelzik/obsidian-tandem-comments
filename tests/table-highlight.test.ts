@@ -115,6 +115,13 @@ describe("locateInTable", () => {
     expect(highlighted(source, "price", 1, 5)).toBe("cut, price");
   });
 
+  it("falls back to the last visible occurrence when hidden source text inflates the count", () => {
+    const source = ["| a |", "| - |", "| [[Price\\|Price]] plan |"].join("\n");
+    const from = source.lastIndexOf("Price");
+    const span = locateInTable(source, findTables(source), from, from + 5, () => ({ textContent: "Price plan" }));
+    expect(span).toMatchObject({ start: 0, end: 5 });
+  });
+
   it("strips inline Markdown from the anchor", () => {
     expect(highlighted(TABLE, "Pricing")).toBe("Pricing");
     const bold = ["| a |", "| - |", "| cut **prices** hard |"].join("\n");

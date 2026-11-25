@@ -68,7 +68,10 @@ export function locateVisibleText(
   occurrence: number
 ): { start: number; end: number } | null {
   const { text, offsets } = withoutWhitespace(rendered);
-  const k = nthIndexOf(text, visible, occurrence);
+  let k = nthIndexOf(text, visible, occurrence);
+  // Unsichtbarer Quelltext (Linkziele, %%Kommentare%%) kann die Zählung zu hoch
+  // treiben: dann lieber das letzte sichtbare Vorkommen als gar kein Highlight.
+  if (k < 0) k = text.lastIndexOf(visible);
   if (k < 0) return null;
   return { start: offsets[k], end: offsets[k + visible.length - 1] + 1 };
 }

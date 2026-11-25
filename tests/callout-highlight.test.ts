@@ -144,6 +144,21 @@ describe("locateInCallout", () => {
     expect(highlighted("> [!note]\n> - alpha", "alpha", { title: "Note", content: "alpha" })).toBe("alpha");
   });
 
+  it("falls back to the last visible occurrence when hidden source text inflates the count", () => {
+    const alias = { title: "Note", content: "see Pricing plan now" };
+    expect(highlighted("> [!note]\n> see [[Pricing|Pricing plan]] now", "Pricing", alias, 1)).toBe("Pricing");
+    const comment = { title: "Note", content: " the price" };
+    expect(highlighted("> [!note]\n> %%price%% the price", "price", comment, 1)).toBe("price");
+  });
+
+  it("does not search the source of a callout that is not rendered", () => {
+    const from = CALLOUT.indexOf("the gaps");
+    let reads = 0;
+    const source = { slice: () => { reads++; return ""; }, lastIndexOf: () => { reads++; return -1; } } as unknown as string;
+    expect(locateInCallout(source, findCallouts(CALLOUT), from, from + 8, () => null)).toBeNull();
+    expect(reads).toBe(0);
+  });
+
   it("returns null when the rendered text does not contain the anchor", () => {
     expect(highlighted(CALLOUT, "the gaps are known", { title: "Answered in part", content: "" })).toBeNull();
   });

@@ -94,6 +94,24 @@ export function clearWidgetHighlights(view: EditorView): void {
 }
 
 /**
+ * Woran erkannt wird, dass sich an den Highlights nichts geändert hat. Die
+ * Positionen sind relativ zum Callout bzw. zur Tabelle: Tippen davor verschiebt
+ * alle Anker, ändert aber an den gerenderten Widgets nichts.
+ */
+export function highlightSignature(
+  anchors: TrackedAnchor[],
+  text: string,
+  tables: ParsedTable[],
+  callouts: ParsedCallout[]
+): string {
+  const blocks: { from: number; to: number }[] = [...tables, ...callouts];
+  return JSON.stringify(anchors.flatMap((a) => {
+    const i = blocks.findIndex((b) => a.from >= b.from && a.to <= b.to);
+    return i < 0 ? [] : [[a.id, i, a.from - blocks[i].from, text.slice(a.from, a.to)]];
+  }));
+}
+
+/**
  * Setzt für jeden Anker, der in einer (als Widget gerenderten) Tabelle oder
  * einem Callout liegt, den Highlight direkt im Widget-DOM. Idempotent: räumt vorher auf.
  */
@@ -109,7 +127,7 @@ export function applyWidgetHighlights(
   const domTables = Array.from(view.contentDOM.querySelectorAll<HTMLTableElement>("table"));
   const domCallouts = Array.from(view.contentDOM.querySelectorAll<HTMLElement>(".cm-callout"));
   const widgets: HTMLElement[] = [...domTables, ...domCallouts];
-  const signature = JSON.stringify(anchors.map((a) => [a.id, a.from, a.to, text.slice(a.from, a.to)]));
+  const signature = highlightSignature(anchors, text, tables, callouts);
   const previous = highlightedViews.get(view);
   const spans = Array.from(view.contentDOM.querySelectorAll(INJECTED));
   if (previous && previous.signature === signature &&
