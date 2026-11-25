@@ -1,11 +1,13 @@
-import { ChangeSet } from "@codemirror/state";
+import { ChangeSet, Text } from "@codemirror/state";
 import { describe, expect, it } from "vitest";
 import {
   canPreservePendingAnchors,
   changesTouchCommentBlock,
   isFullReplace,
   mapAnchors,
+  mapAnchorsPrecisely,
   mergePendingAnchors,
+  refineChanges,
   shouldPreservePendingAnchors,
 } from "../src/reanchor";
 
@@ -129,5 +131,48 @@ describe("pending anchors across comment-block transactions", () => {
     expect(
       mergePendingAnchors([], [{ id: "removed", from: 10, to: 18 }], new Set())
     ).toEqual([]);
+  });
+});
+
+describe("refineChanges", () => {
+  const random = (seed: number) => () => (seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648;
+
+  it("produces the same document as the original change", () => {
+    const next = random(7);
+    const chars = "ab -|\nx[]";
+    const text = (length: number) => Array.from({ length }, () => chars[Math.floor(next() * chars.length)]).join("");
+    for (let run = 0; run < 3000; run++) {
+      const doc = Text.of(text(40).split("\n"));
+      const from = Math.floor(next() * 20);
+      const changes = ChangeSet.of({ from, to: from + 1 + Math.floor(next() * 19), insert: text(Math.floor(next() * 20)) }, doc.length);
+      expect((refineChanges(changes, doc) ?? changes).apply(doc).toString()).toBe(changes.apply(doc).toString());
+    }
+  });
+
+  it("leaves pure insertions and deletions alone", () => {
+    const doc = Text.of(["some text"]);
+    expect(refineChanges(ChangeSet.of({ from: 2, insert: "x" }, doc.length), doc)).toBeNull();
+    expect(refineChanges(ChangeSet.of({ from: 2, to: 4 }, doc.length), doc)).toBeNull();
+  });
+
+  it("follows every cell through random column padding", () => {
+    const next = random(11);
+    const words = Array.from({ length: 12 }, (_, i) => `word${i}`);
+    const table = () => {
+      const pad = () => " ".repeat(1 + Math.floor(next() * 8));
+      const rows = [0, 3, 6, 9].map((i) => `|${words.slice(i, i + 3).map((w) => ` ${w}${pad()}`).join("|")}|`);
+      rows.splice(1, 0, `|${[0, 1, 2].map(() => ` ${"-".repeat(3 + Math.floor(next() * 8))} `).join("|")}|`);
+      return rows.join("\n");
+    };
+    for (let run = 0; run < 300; run++) {
+      const before = table();
+      const after = table();
+      const doc = Text.of(before.split("\n"));
+      const changes = ChangeSet.of({ from: 0, to: before.length, insert: after }, doc.length);
+      const anchors = words.map((word) => ({ id: word, from: before.indexOf(word + " "), to: before.indexOf(word + " ") + word.length }));
+      const { mapped, torn } = mapAnchorsPrecisely(anchors, changes, doc);
+      expect(torn.size).toBe(0);
+      expect(mapped.map((a) => after.slice(a.from, a.to))).toEqual(words);
+    }
   });
 });

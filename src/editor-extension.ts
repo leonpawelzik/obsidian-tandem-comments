@@ -5,6 +5,7 @@ import {
   changesTouchCommentBlock,
   isFullReplace,
   mapAnchors,
+  mapAnchorsPrecisely,
   mergePendingAnchors,
   shouldPreservePendingAnchors,
   type TrackedAnchor,
@@ -195,26 +196,28 @@ function editorAnchorTrackerClass(plugin: EditorExtensionHost) {
             ranges.push({ from: fromB, to: toB });
           });
           const hasOpenComments = this.anchors.length > 0 || Object.values(newDoc.comments).some((comment) => comment.status === "open");
+          const { mapped, torn } = mapAnchorsPrecisely(this.anchors, u.changes, u.startState.doc);
           if (hasOpenComments && rangesTouchTable(text, newProseLen, ranges, this.widgetsFor(text, newProseLen).tables)) {
-            // Tabellen-Edit: Positionen durch die Änderung mappen (Anker folgen
-            // echten Text-Edits wie in Prosa). Anker, die bei Obsidians Tabellen-
-            // Neuformatierung (Ganz-Block-Replace) kollabieren, per exaktem Text
-            // wiederherstellen statt sie zu verlieren. performReanchor schreibt nur
-            // um, wenn der exact-Text wirklich weg ist — schützt vor Korruption.
-            const mapped = mapAnchors(this.anchors, u.changes);
-            const survived = new Set(mapped.map((a) => a.id));
-            this.anchors = mapped;
-            const doc = this.readDocument(text);
-            for (const [id, c] of Object.entries(doc.comments)) {
+            // Tabellen-Edit: Anker, die Obsidians Umbau (Zeilen sortieren, Spalten
+            // verschieben …) zerreißt oder löscht, per exaktem Text innerhalb des
+            // Geänderten wiederfinden statt sie zu verlieren.
+            const safe = mapped.filter((a) => !torn.has(a.id));
+            const guessed = new Map(mapped.filter((a) => torn.has(a.id)).map((a) => [a.id, a]));
+            const survived = new Set(safe.map((a) => a.id));
+            this.anchors = safe;
+            for (const [id, c] of Object.entries(newDoc.comments)) {
               if (c.status === "resolved" || survived.has(id)) continue;
-              const r = resolveAnchor(doc.prose, c.anchor);
-              if (r.kind === "resolved") this.anchors.push({ id, from: r.start, to: r.end });
+              const r = resolveAnchor(newDoc.prose, c.anchor);
+              const found = r.kind === "resolved" && ranges.some((range) => r.start >= range.from && r.end <= range.to);
+              const fallback = guessed.get(id);
+              if (found) this.anchors.push({ id, from: r.start, to: r.end });
+              else if (fallback) this.anchors.push(fallback);
             }
             this.anchors.sort((a, b) => a.from - b.from);
             this.dirty = true;
             this.scheduleReanchor();
           } else {
-            this.anchors = mapAnchors(this.anchors, u.changes);
+            this.anchors = mapped;
             this.dirty = this.anchors.length > 0;
             if (this.dirty) this.scheduleReanchor();
           }
@@ -315,11 +318,11 @@ function editorAnchorTrackerClass(plugin: EditorExtensionHost) {
           if (!c || c.status === "resolved") continue;
           if (t.to > doc.prose.length) continue;
           const cur = c.anchor;
-          // Nur umschreiben, wenn der bisherige exact-Text nicht mehr auffindbar
-          // ist (= echte Bearbeitung des Zitats). Ist er noch da, war die Änderung
-          // nur drumherum (z.B. Obsidians Tabellen-Neuformatierung) — ein Rewrite
-          // aus evtl. verschobenen Positionen würde den Anker korrumpieren.
-          if (cur.exact && doc.prose.includes(cur.exact)) continue;
+          // Nur umschreiben, wenn der gespeicherte Anker nicht mehr genau hierher
+          // führt — auch wenn sein Zitat anderswo noch vorkommt: sonst säße der
+          // Kommentar nach dem Neuöffnen an der anderen Stelle.
+          const stored = resolveAnchor(doc.prose, cur);
+          if (stored.kind === "resolved" && stored.start === t.from && stored.end === t.to) continue;
           const next = makeAnchor(doc.prose, t.from, t.to);
           if (
             next.exact &&

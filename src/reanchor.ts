@@ -1,4 +1,4 @@
-import type { ChangeSet } from "@codemirror/state";
+import { ChangeSet, type Text } from "@codemirror/state";
 
 export interface TrackedAnchor {
   id: string;
@@ -16,6 +16,106 @@ export function mapAnchors(anchors: TrackedAnchor[], changes: ChangeSet): Tracke
   return anchors
     .map((a) => ({ id: a.id, from: changes.mapPos(a.from, 1), to: changes.mapPos(a.to, -1) }))
     .filter((a) => a.to > a.from);
+}
+
+/** Zeichen, mit denen Obsidian Tabellenspalten auffüllt (Leerraum, Delimiter-Striche). */
+const PADDING = /[\s-]/;
+
+interface Replacement {
+  from: number;
+  to: number;
+  insert: string;
+}
+
+/**
+ * Grenzt eine Ersetzung auf das ein, was sich wirklich ändert: gleicher Text an
+ * Anfang und Ende fällt weg, Unterschiede nur in der Auffüllung werden eigene
+ * kleine Änderungen. Übrig bleibt höchstens eine echte Änderung in der Mitte.
+ */
+function refineReplacement(from: number, before: string, after: string): Replacement[] {
+  const out: Replacement[] = [];
+  let i = 0;
+  let j = 0;
+  while (i < before.length && j < after.length) {
+    if (before[i] === after[j]) {
+      i++;
+      j++;
+      continue;
+    }
+    let nextI = i;
+    let nextJ = j;
+    while (nextI < before.length && PADDING.test(before[nextI])) nextI++;
+    while (nextJ < after.length && PADDING.test(after[nextJ])) nextJ++;
+    if ((nextI === i && nextJ === j) || nextI === before.length || before[nextI] !== after[nextJ]) break;
+    out.push({ from: from + i, to: from + nextI, insert: after.slice(j, nextJ) });
+    i = nextI;
+    j = nextJ;
+  }
+  let endI = before.length;
+  let endJ = after.length;
+  while (endI > i && endJ > j) {
+    if (before[endI - 1] === after[endJ - 1]) {
+      endI--;
+      endJ--;
+      continue;
+    }
+    let nextI = endI;
+    let nextJ = endJ;
+    while (nextI > i && PADDING.test(before[nextI - 1])) nextI--;
+    while (nextJ > j && PADDING.test(after[nextJ - 1])) nextJ--;
+    if ((nextI === endI && nextJ === endJ) || nextI === i || nextJ === j || before[nextI - 1] !== after[nextJ - 1]) break;
+    out.push({ from: from + nextI, to: from + endI, insert: after.slice(nextJ, endJ) });
+    endI = nextI;
+    endJ = nextJ;
+  }
+  if (endI > i || endJ > j) out.push({ from: from + i, to: from + endI, insert: after.slice(j, endJ) });
+  return out;
+}
+
+/** Dieselbe Änderung, mit eingegrenzten Ersetzungen; null, wenn sie gar keine Ersetzung enthält. */
+export function refineChanges(changes: ChangeSet, oldDoc: Text): ChangeSet | null {
+  const refined: Replacement[] = [];
+  let hasReplacement = false;
+  changes.iterChanges((fromA, toA, _fromB, _toB, inserted) => {
+    const insert = inserted.toString();
+    if (toA > fromA && insert) {
+      hasReplacement = true;
+      refined.push(...refineReplacement(fromA, oldDoc.sliceString(fromA, toA), insert));
+    } else {
+      refined.push({ from: fromA, to: toA, insert });
+    }
+  }, true);
+  return hasReplacement ? ChangeSet.of(refined, changes.length) : null;
+}
+
+/**
+ * Wie mapAnchors, aber auch durch Ersetzungen größerer Blöcke hindurch: Obsidian
+ * ersetzt bei kleinen Edits ganze Tabellenzellen, Tabellen oder Callouts.
+ * `torn` sind Anker, deren Rand mitten im wirklich Ersetzten liegt — ihre
+ * Position ist dort nur geraten.
+ */
+export function mapAnchorsPrecisely(
+  anchors: TrackedAnchor[],
+  changes: ChangeSet,
+  oldDoc: Text
+): { mapped: TrackedAnchor[]; torn: Set<string> } {
+  const refined = refineChanges(changes, oldDoc);
+  if (!refined) return { mapped: mapAnchors(anchors, changes), torn: new Set() };
+  const torn = new Set<string>();
+  refined.iterChangedRanges((fromA, toA) => {
+    for (const a of anchors) {
+      if ((fromA < a.from && a.from < toA) || (fromA < a.to && a.to < toA)) torn.add(a.id);
+    }
+  }, true);
+  const newDoc = changes.apply(oldDoc);
+  const mapped = [
+    ...mapAnchors(anchors.filter((a) => !torn.has(a.id)), refined),
+    ...mapAnchors(anchors.filter((a) => torn.has(a.id)), changes),
+  ]
+    // Vom Zitat blieb nur Auffüllung übrig: Es wurde gelöscht.
+    .filter((a) => newDoc.sliceString(a.from, a.to).trim())
+    .sort((a, b) => a.from - b.from);
+  return { mapped, torn };
 }
 
 /**
