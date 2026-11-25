@@ -17,13 +17,37 @@
 
 .tc-header {
   display: flex;
-  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 4px;
   align-items: center;
   margin-bottom: 10px;
 }
 
+.tc-picked {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px;
+  margin-bottom: 10px;
+}
+
+.tc-picked-link {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-accent);
+}
+
 .tc-title {
   font-weight: 600;
+  margin-right: auto;
+}
+
+.tc-header .tc-toggle {
+  height: auto;
+  padding: 4px 8px;
+  font-size: var(--font-ui-smaller);
 }
 
 .tc-card {
@@ -52,6 +76,11 @@
   border-left: 3px solid var(--tc-highlight-color, #ffd54a);
   padding-left: 6px;
   margin-bottom: 6px;
+}
+
+.tc-quote-note {
+  font-style: normal;
+  border-left-color: var(--background-modifier-border-hover);
 }
 
 .tc-quote-link {

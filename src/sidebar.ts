@@ -10,6 +10,7 @@ import {
   Notice,
   setIcon,
   setTooltip,
+  type TAbstractFile,
   TFile,
   WorkspaceLeaf,
 } from "obsidian";
@@ -26,6 +27,8 @@ import {
   declineSuggestion,
   editThreadEntry,
   generateId,
+  isNoteAnchor,
+  noteAnchor,
   removeComment,
   removeThreadEntry,
   resolveAll,
@@ -51,6 +54,13 @@ interface Draft {
 
 function truncate(s: string, n: number): string {
   return s.length <= n ? s : s.slice(0, n - 1) + "…";
+}
+
+/** Kopfzeile einer Karte: das Zitat oder der Hinweis, dass die ganze Notiz gemeint ist. */
+function quoteLabel(anchor: Anchor): { text: string; cls: string } {
+  return isNoteAnchor(anchor)
+    ? { text: "Whole note", cls: "tc-quote tc-quote-note" }
+    : { text: `"${truncate(anchor.exact, 80)}"`, cls: "tc-quote" };
 }
 
 /** Colors an author name span with accessible light and dark variants. */
@@ -106,6 +116,7 @@ export class CommentSidebar extends ItemView implements HoverParent {
   private cards = new Map<string, RenderedCard>();
   private cardContext = "";
   private renderedFile: TFile | null = null;
+  private picked: TFile | null = null;
 
   async onClose(): Promise<void> {
     this.closed = true;
@@ -123,7 +134,7 @@ export class CommentSidebar extends ItemView implements HoverParent {
   }
 
   private focusExisting(): boolean {
-    if (!this.focusedId || this.renderedFile !== this.app.workspace.getActiveFile()) return false;
+    if (!this.focusedId || this.renderedFile !== this.shownFile()) return false;
     const card = this.cards.get(this.focusedId)?.element;
     if (!card?.isConnected) return false;
     this.clearFocus();
@@ -150,10 +161,22 @@ export class CommentSidebar extends ItemView implements HoverParent {
 
   async onOpen(): Promise<void> {
     this.closed = false;
-    this.registerEvent(this.app.workspace.on("file-open", () => void this.render()));
+    this.registerEvent(
+      this.app.workspace.on("file-open", () => {
+        this.followActive();
+        void this.render();
+      })
+    );
+    // Zurück in die schon aktive Notiz: Dabei meldet Obsidian kein file-open.
+    this.registerEvent(
+      this.app.workspace.on("active-leaf-change", (leaf) => {
+        if (leaf?.view.getViewType() === "markdown") this.followActive();
+      })
+    );
+    this.registerEvent(this.app.vault.on("delete", (f) => this.noteDeleted(f)));
     this.registerEvent(
       this.app.vault.on("modify", (f) => {
-        if (f.path === this.app.workspace.getActiveFile()?.path && !this.hasPendingInput()) {
+        if (f.path === this.shownFile()?.path && !this.hasPendingInput()) {
           void this.render();
         }
       })
@@ -166,17 +189,39 @@ export class CommentSidebar extends ItemView implements HoverParent {
     await this.render();
   }
 
+  /** Die Notiz, deren Kommentare die Sidebar zeigt. */
+  shownFile(): TFile | null {
+    return this.picked ?? this.app.workspace.getActiveFile();
+  }
+
+  /** Zeigt eine Notiz, ohne sie zu öffnen (z.B. eine Karte auf einem Kanban-Board). */
+  showNote(file: TFile): void {
+    this.picked = file.path === this.app.workspace.getActiveFile()?.path ? null : file;
+    void this.render();
+  }
+
+  followActive(): void {
+    if (!this.picked) return;
+    this.picked = null;
+    void this.render();
+  }
+
+  noteDeleted(file: TAbstractFile): void {
+    if (file.path === this.picked?.path) this.followActive();
+  }
+
   startDraft(file: TFile, anchor: Anchor): void {
     this.draft = { filePath: file.path, anchor, kind: "comment" };
-    void this.render();
+    this.showNote(file);
   }
 
   startSuggestionDraft(file: TFile, anchor: Anchor): void {
     this.draft = { filePath: file.path, anchor, kind: "suggestion" };
-    void this.render();
+    this.showNote(file);
   }
 
   focusComment(id: string): void {
+    this.followActive();
     this.clearFocus();
     this.focusedId = id;
     if (!this.focusExisting()) void this.render();
@@ -227,9 +272,9 @@ export class CommentSidebar extends ItemView implements HoverParent {
 
   private async renderLatest(version: number): Promise<void> {
     const live = this.contentEl;
-    const file = this.app.workspace.getActiveFile();
+    const file = this.shownFile();
     const doc = file?.extension === "md" ? await this.plugin.readDoc(file) : null;
-    if (this.closed || version !== this.renderVersion || file !== this.app.workspace.getActiveFile()) return;
+    if (this.closed || version !== this.renderVersion || file !== this.shownFile()) return;
     this.clearFocus();
     this.renderedFile = file;
     const prevScroll = live.scrollTop;
@@ -267,6 +312,18 @@ export class CommentSidebar extends ItemView implements HoverParent {
 
     const header = container.createDiv({ cls: "tc-header" });
     header.createSpan({ text: "Comments", cls: "tc-title" });
+    const addBtn = header.createEl("button", {
+      cls: "tc-header-action clickable-icon",
+      attr: { "aria-label": "Comment on note" },
+    });
+    setIcon(addBtn, "message-square-plus");
+    setTooltip(addBtn, "Comment on note");
+    addBtn.onclick = () => {
+      // Einen angefangenen Entwurf nicht überschreiben.
+      const pending = live.querySelector<HTMLTextAreaElement>(".tc-draft textarea");
+      if (pending?.value) pending.focus();
+      else this.startDraft(file, noteAnchor());
+    };
     const toggle = header.createEl("button", {
       text: this.showResolved ? "Hide resolved" : "Show resolved",
       cls: "tc-toggle",
@@ -274,6 +331,8 @@ export class CommentSidebar extends ItemView implements HoverParent {
     toggle.onclick = () => this.toggleResolved();
     const exportBtn = header.createEl("button", { text: "Export", cls: "tc-toggle" });
     exportBtn.onclick = () => void this.plugin.exportComments(file);
+
+    if (this.picked) this.renderPicked(container, this.picked);
 
     if (this.draft && this.draft.filePath === file.path) this.renderDraft(container, file);
     else this.draft = null;
@@ -283,7 +342,7 @@ export class CommentSidebar extends ItemView implements HoverParent {
     );
     const all = resolveAll(doc.prose, visibleComments);
     const open = this.sortComments(
-      all.filter((r) => r.comment.status === "open" && r.resolution.kind === "resolved")
+      all.filter((r) => r.comment.status === "open" && r.resolution.kind !== "orphaned")
     );
     const orphans = this.sortComments(
       all.filter((r) => r.comment.status === "open" && r.resolution.kind === "orphaned")
@@ -330,11 +389,23 @@ export class CommentSidebar extends ItemView implements HoverParent {
     commit();
   }
 
+  /** Welche Notiz gerade gemeint ist, solange sie nicht die aktive ist. */
+  private renderPicked(container: HTMLElement, file: TFile): void {
+    const row = container.createDiv({ cls: "tc-picked" });
+    const link = row.createEl("button", { text: file.basename, cls: "tc-picked-link clickable-icon" });
+    setTooltip(link, "Open note");
+    link.onclick = () => void this.app.workspace.getLeaf("tab").openFile(file);
+    const close = row.createEl("button", { cls: "clickable-icon", attr: { "aria-label": "Back to active note" } });
+    setIcon(close, "x");
+    setTooltip(close, "Back to active note");
+    close.onclick = () => this.followActive();
+  }
+
   private renderDraft(container: HTMLElement, file: TFile): void {
     const draft = this.draft;
     if (!draft) return;
     const card = container.createDiv({ cls: "tc-card tc-draft" });
-    card.createDiv({ text: `"${truncate(draft.anchor.exact, 80)}"`, cls: "tc-quote" });
+    card.createDiv(quoteLabel(draft.anchor));
     if (draft.kind === "suggestion") {
       this.renderSuggestionDraft(card, file, draft);
       return;
@@ -615,7 +686,7 @@ export class CommentSidebar extends ItemView implements HoverParent {
         });
       }
     } else {
-      const quote = card.createDiv({ text: `"${truncate(r.comment.anchor.exact, 80)}"`, cls: "tc-quote" });
+      const quote = card.createDiv(quoteLabel(r.comment.anchor));
       if (r.resolution.kind === "resolved") {
         quote.addClass("tc-quote-link");
         quote.onclick = () => this.plugin.revealAnchor(file, r.comment.anchor);

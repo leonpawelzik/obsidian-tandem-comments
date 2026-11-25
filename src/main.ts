@@ -30,6 +30,7 @@ import { commitSuggestionAcceptance } from "./suggestion-editor";
 import {
   type SuggestionAcceptancePlan,
   makeAnchor,
+  noteAnchor,
   parseDocument,
   planSuggestionAcceptance,
   resolveAll,
@@ -80,6 +81,12 @@ export default class CommentsPlugin extends Plugin {
       editorCallback: (editor) => this.addCommentFromSelection(editor),
     });
     this.addCommand({
+      id: "add-note-comment",
+      name: "Add comment to note",
+      icon: "message-square-text",
+      callback: () => this.addNoteComment(),
+    });
+    this.addCommand({
       id: "suggest-edit",
       name: "Suggest edit",
       icon: "replace",
@@ -118,6 +125,17 @@ export default class CommentsPlugin extends Plugin {
       },
     });
 
+    this.registerEvent(
+      this.app.workspace.on("file-menu", (menu, file) => {
+        if (!(file instanceof TFile) || file.extension !== "md") return;
+        menu.addItem((item) =>
+          item
+            .setTitle("Comment on note")
+            .setIcon("message-square-plus")
+            .onClick(() => this.addNoteComment(file))
+        );
+      })
+    );
     this.registerEvent(
       this.app.workspace.on("editor-menu", (menu, editor) => {
         if (!editor.somethingSelected()) return;
@@ -351,9 +369,32 @@ export default class CommentsPlugin extends Plugin {
     new Notice("Review threads exported to " + path);
   }
 
+  /**
+   * Kommentar zur ganzen Notiz; braucht weder Auswahl noch Editor (Reading View).
+   * Ohne Angabe für die aktive Notiz, sonst für die in der Sidebar gezeigte.
+   */
+  addNoteComment(target?: TFile): void {
+    const active = this.app.workspace.getActiveFile();
+    const file = target ?? (active?.extension === "md" ? active : this.sidebarNote());
+    if (!file || file.extension !== "md") {
+      new Notice("No active Markdown file.");
+      return;
+    }
+    void this.openSidebar().then((view) => view?.startDraft(file, noteAnchor()));
+  }
+
+  private sidebarNote(): TFile | null {
+    const view = this.app.workspace.getLeavesOfType(VIEW_TYPE_COMMENTS)[0]?.view;
+    return view instanceof CommentSidebar ? view.shownFile() : null;
+  }
+
   addCommentFromSelection(editor: Editor): void {
     const file = this.app.workspace.getActiveFile();
     if (!file) return;
+    if (!editor.somethingSelected()) {
+      this.addNoteComment();
+      return;
+    }
     const anchor = this.anchorFromSelection(editor);
     if (!anchor) return;
     void this.openSidebar().then((view) => view?.startDraft(file, anchor));

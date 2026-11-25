@@ -13,7 +13,7 @@ import type {
 
 export const SCHEMA_HINT_LINES = [
   '// Schema: { "<id>": { anchor:{exact,prefix,suffix,pos?}, status:open|resolved, thread:[{author,ts,text}], suggestion?:{replacement,author,ts,result?} } }',
-  '// Anchor = quote from the prose. To locate: search for "exact", disambiguate via prefix/suffix.',
+  '// Anchor = quote from the prose. To locate: search for "exact", disambiguate via prefix/suffix. scope "note" = comment on the whole note, no quote.',
   // Ohne diese Zeile editieren Agents ohne Skill oft nur die Prosa und lassen
   // Threads unbeantwortet mit veralteten Ankern zurück (Issue #35).
   "// Addressing comments: handle every open id. After acting, append a reply {author: your name, ts, text} to its thread, and if you edited the quoted text, update its anchor to the new wording.",
@@ -149,7 +149,17 @@ function contextMatches(prose: string, at: number, len: number, anchor: Anchor):
   return true;
 }
 
+/** Anker für Kommentare zur ganzen Notiz. Das leere Zitat zeigen ältere Versionen als verwaist an. */
+export function noteAnchor(): Anchor {
+  return { exact: "", scope: "note" };
+}
+
+export function isNoteAnchor(anchor: Anchor): boolean {
+  return anchor.scope === "note";
+}
+
 export function resolveAnchor(prose: string, anchor: Anchor): AnchorResolution {
+  if (isNoteAnchor(anchor)) return { kind: "note" };
   const exact = anchor.exact;
   if (!exact || anchor.orphaned) return { kind: "orphaned" };
   // Search the more selective context first. A contextual hit is exactly a hit
@@ -352,7 +362,7 @@ export function acceptSuggestion(
   if (replacement.length === 0) return { ok: false, reason: "empty-replacement" };
 
   const resolution = resolveAnchor(doc.prose, comment.anchor);
-  if (resolution.kind === "orphaned") return { ok: false, reason: "orphaned" };
+  if (resolution.kind !== "resolved") return { ok: false, reason: "orphaned" };
   if (resolution.ambiguous) return { ok: false, reason: "ambiguous" };
   if (doc.prose.slice(resolution.start, resolution.end) !== comment.anchor.exact) {
     return { ok: false, reason: "orphaned" };

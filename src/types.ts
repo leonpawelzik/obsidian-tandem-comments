@@ -1,6 +1,8 @@
 export interface Anchor {
-  /** Exaktes Zitat des kommentierten Bereichs. */
+  /** Exaktes Zitat des kommentierten Bereichs (leer bei `scope: "note"`). */
   exact: string;
+  /** Kommentar zur ganzen Notiz statt zu einer Textstelle. */
+  scope?: "note";
   /** Wenige Zeichen vor dem Zitat zur Disambiguierung. */
   prefix?: string;
   /** Wenige Zeichen nach dem Zitat zur Disambiguierung. */
@@ -55,6 +57,7 @@ export interface ParsedDoc {
 
 export type AnchorResolution =
   | { kind: "resolved"; start: number; end: number; ambiguous?: boolean }
+  | { kind: "note" }
   | { kind: "orphaned" };
 
 export interface ResolvedComment {

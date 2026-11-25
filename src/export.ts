@@ -1,3 +1,4 @@
+import { documentPosition } from "./sidebar-preferences";
 import type { ResolvedComment } from "./types";
 
 export type ExportScope = "all" | "open";
@@ -33,10 +34,13 @@ export function formatComment(r: ResolvedComment, opts: FormatOptions): string {
     : "";
   const body = [proposal, thread].filter(Boolean).join("\n\n");
   if (!opts.includeQuote) return body;
-  const quote = r.comment.anchor.exact
-    .split("\n")
-    .map((l) => "> " + l)
-    .join("\n");
+  const quote =
+    r.resolution.kind === "note"
+      ? "*Whole note*"
+      : r.comment.anchor.exact
+          .split("\n")
+          .map((l) => "> " + l)
+          .join("\n");
   return body ? quote + "\n\n" + body : quote;
 }
 
@@ -68,10 +72,9 @@ interface ExportOptions {
 }
 
 export function buildExportNote(sourceName: string, all: ResolvedComment[], opts: ExportOptions): string | null {
-  const startOf = (r: ResolvedComment) => (r.resolution.kind === "resolved" ? r.resolution.start : 0);
   const open = all
-    .filter((r) => r.comment.status === "open" && r.resolution.kind === "resolved")
-    .sort((a, b) => startOf(a) - startOf(b));
+    .filter((r) => r.comment.status === "open" && r.resolution.kind !== "orphaned")
+    .sort((a, b) => documentPosition(a) - documentPosition(b));
   const orphans = all.filter((r) => r.comment.status === "open" && r.resolution.kind === "orphaned");
   const done = opts.scope === "all" ? all.filter((r) => r.comment.status === "resolved") : [];
   if (!open.length && !orphans.length && !done.length) return null;
